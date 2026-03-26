@@ -427,10 +427,15 @@ program
 // ============================================================
 program
   .command('serve')
-  .description('Start the Prime API server (REST + future MCP)')
+  .description('Start the Prime API + MCP server with background sync')
   .option('-p, --port <port>', 'Port number', '3210')
+  .option('--no-sync', 'Disable background sync')
+  .option('--sync-interval <minutes>', 'Sync interval in minutes', '15')
   .action(async (opts: any) => {
-    await startServer(parseInt(opts.port) || 3210);
+    await startServer(parseInt(opts.port) || 3210, {
+      sync: opts.sync !== false,
+      syncInterval: parseInt(opts.syncInterval) || 15,
+    });
   });
 
 program.parse();

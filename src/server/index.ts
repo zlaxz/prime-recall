@@ -5,8 +5,9 @@ import { extractIntelligence } from '../ai/extract.js';
 import { ask } from '../ai/ask.js';
 import { v4 as uuid } from 'uuid';
 import { processOtterMeeting } from '../connectors/otter.js';
+import { startScheduler } from '../scheduler.js';
 
-export async function startServer(port: number = 3210) {
+export async function startServer(port: number = 3210, options: { sync?: boolean; syncInterval?: number } = {}) {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
 
@@ -241,6 +242,11 @@ export async function startServer(port: number = 3210) {
     console.log('    POST /api/ingest    — Add knowledge');
     console.log('    POST /api/remember  — Quick capture');
     console.log('    GET  /api/status    — Knowledge base stats');
-    console.log('    GET  /api/query/*   — Structured queries\n');
+    console.log('    GET  /api/query/*   — Structured queries');
+    console.log('    POST /api/webhooks/otter — Otter.ai webhook\n');
+
+    if (options.sync !== false) {
+      startScheduler(options.syncInterval || 15);
+    }
   });
 }
