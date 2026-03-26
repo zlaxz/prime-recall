@@ -334,29 +334,73 @@ export async function connectClaude(db: Database.Database, sessionKeyParam?: str
 }
 
 /**
- * Extract artifacts from assistant message text.
- * Artifacts are embedded as <antArtifact identifier="..." type="..." title="...">content</antArtifact>
+ * Extract artifacts from messages.
+ *
+ * Artifacts are stored in TWO places:
+ * 1. As <antArtifact> XML tags in assistant message text (older format)
+ * 2. As attachments on messages (current API format) — with extracted_content
  */
-function extractArtifacts(text: string): { title: string; type: string; identifier: string; content: string }[] {
+function extractArtifacts(messages: ClaudeMessage[]): { title: string; type: string; identifier: string; content: string }[] {
   const artifacts: { title: string; type: string; identifier: string; content: string }[] = [];
-  const regex = /<antArtifact\s+([^>]*)>([\s\S]*?)<\/antArtifact>/g;
 
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    const attrs = match[1];
-    const content = match[2].trim();
+  for (const msg of messages) {
+    // Method 1: Parse <antArtifact> XML from assistant text
+    if (msg.sender === 'assistant' && msg.text) {
+      const regex = /<antArtifact\s+([^>]*)>([\s\S]*?)<\/antArtifact>/g;
+      let match;
+      while ((match = regex.exec(msg.text)) !== null) {
+        const attrs = match[1];
+        const content = match[2].trim();
+        const getAttr = (name: string) => {
+          const m = attrs.match(new RegExp(`${name}="([^"]*)"`));
+          return m ? m[1] : '';
+        };
+        artifacts.push({
+          title: getAttr('title') || 'Untitled artifact',
+          type: getAttr('type') || 'unknown',
+          identifier: getAttr('identifier') || `xml-${msg.uuid}`,
+          content,
+        });
+      }
+    }
 
-    const getAttr = (name: string) => {
-      const m = attrs.match(new RegExp(`${name}="([^"]*)"`));
-      return m ? m[1] : '';
-    };
+    // Method 2: Extract from attachments (current API format)
+    const attachments = msg.attachments || [];
+    for (const att of attachments) {
+      if (att.extracted_content && att.extracted_content.length > 100) {
+        // Determine artifact type from file_type and content
+        const fileType = att.file_type || 'unknown';
+        let artifactType = 'document';
+        if (['tsx', 'jsx', 'ts', 'js', 'py'].includes(fileType) || att.extracted_content.includes('import ') || att.extracted_content.includes('function ')) {
+          artifactType = 'code';
+        } else if (att.extracted_content.includes('<html') || att.extracted_content.includes('<!DOCTYPE')) {
+          artifactType = 'html';
+        } else if (fileType === 'svg' || att.extracted_content.includes('<svg')) {
+          artifactType = 'svg';
+        }
 
-    artifacts.push({
-      title: getAttr('title'),
-      type: getAttr('type'),
-      identifier: getAttr('identifier'),
-      content,
-    });
+        // Try to infer title from first meaningful line or file_name
+        let title = att.file_name || '';
+        if (!title) {
+          // Look for component names, function names, or class names
+          const nameMatch = att.extracted_content.match(/(?:export default function|function|class|const)\s+(\w+)/);
+          if (nameMatch) {
+            title = nameMatch[1];
+          } else {
+            // Use first non-empty line
+            const firstLine = att.extracted_content.split('\n').find((l: string) => l.trim().length > 5);
+            title = firstLine?.trim().slice(0, 60) || 'Attachment artifact';
+          }
+        }
+
+        artifacts.push({
+          title,
+          type: artifactType,
+          identifier: att.id || `att-${msg.uuid}`,
+          content: att.extracted_content,
+        });
+      }
+    }
   }
 
   return artifacts;
@@ -495,9 +539,8 @@ export async function scanClaude(
           .join('\n\n')
           .slice(0, 8000);
 
-        const artifacts = messages
-          .filter(m => m.sender === 'assistant')
-          .flatMap(m => extractArtifacts(m.text));
+        // Extract artifacts from ALL messages (assistant text + attachments)
+        const artifacts = extractArtifacts(messages);
 
         const extracted = await extractIntelligence(conversationText, apiKey);
         const projectName = convo.project_uuid ? (projectMap.get(convo.project_uuid) ?? null) : null;
