@@ -2,7 +2,7 @@ import express from 'express';
 import { getDb, searchByText, searchByEmbedding, insertKnowledge, getStats, getConfig, type KnowledgeItem } from '../db.js';
 import { generateEmbedding } from '../embedding.js';
 import { extractIntelligence } from '../ai/extract.js';
-import { ask } from '../ai/ask.js';
+import { askWithSources } from '../ai/ask.js';
 import { v4 as uuid } from 'uuid';
 import { processOtterMeeting } from '../connectors/otter.js';
 import { startScheduler } from '../scheduler.js';
@@ -70,8 +70,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
       const { question, model } = req.body;
       if (!question) return res.status(400).json({ error: 'question required' });
 
-      const answer = await ask(db, question, { model });
-      res.json({ answer });
+      const result = await askWithSources(db, question, { model });
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

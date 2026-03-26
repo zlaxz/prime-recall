@@ -28,7 +28,7 @@
 import { getDb, searchByText, searchByEmbedding, insertKnowledge, getStats, getConfig, type KnowledgeItem } from '../db.js';
 import { generateEmbedding } from '../embedding.js';
 import { extractIntelligence } from '../ai/extract.js';
-import { ask } from '../ai/ask.js';
+import { askWithSources } from '../ai/ask.js';
 import { v4 as uuid } from 'uuid';
 
 // MCP stdio protocol implementation
@@ -205,7 +205,8 @@ async function main() {
           }
 
           case 'prime_ask': {
-            result = await ask(db, args.question);
+            const askResult = await askWithSources(db, args.question);
+            result = askResult.answer + '\n\nSources:\n' + askResult.sources.map(s => `[${s.num}] ${s.title} (${s.source})`).join('\n');
             break;
           }
 

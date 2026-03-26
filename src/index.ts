@@ -4,7 +4,7 @@ import { Command } from 'commander';
 import { getDb, saveDb, getStats, setConfig, getConfig, searchByText, searchByEmbedding, insertKnowledge, type KnowledgeItem } from './db.js';
 import { generateEmbedding } from './embedding.js';
 import { extractIntelligence } from './ai/extract.js';
-import { ask as askPrime } from './ai/ask.js';
+import { askWithSources } from './ai/ask.js';
 import { startServer } from './server/index.js';
 import { v4 as uuid } from 'uuid';
 import { connectGmail, scanGmail } from './connectors/gmail.js';
@@ -272,8 +272,19 @@ program
     console.log('\n  ⚡ Thinking...\n');
 
     try {
-      const answer = await askPrime(db, question, { model: opts.model });
-      console.log(`  ${answer.replace(/\n/g, '\n  ')}\n`);
+      const { answer, sources } = await askWithSources(db, question, { model: opts.model });
+      console.log(`  ${answer.replace(/\n/g, '\n  ')}`);
+
+      // Show source references
+      if (sources.length > 0) {
+        console.log('\n  ─────────────────────────────────────');
+        console.log('  📎 Sources:');
+        for (const s of sources.slice(0, 8)) {
+          const sim = s.similarity ? ` (${(s.similarity * 100).toFixed(0)}%)` : '';
+          console.log(`     [${s.num}] ${s.title} — ${s.source}${sim}`);
+        }
+      }
+      console.log('');
     } catch (err: any) {
       console.error(`  Error: ${err.message}\n`);
     }
