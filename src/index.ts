@@ -1838,7 +1838,7 @@ program
     console.log(`\n⚡ Running ${agent.role} (${name})...\n`);
 
     const result = await runAgent(name, {
-      background: opts.background,
+      background: !!opts.background,
       task: opts.task,
     });
 
