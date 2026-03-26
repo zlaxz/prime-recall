@@ -72,13 +72,25 @@ export async function scanCalendar(
   if (!tokens) throw new Error('Calendar not connected. Run: prime connect calendar');
   if (!apiKey) throw new Error('No API key. Run: prime init');
 
-  const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+  const clientId = CLIENT_ID || getConfig(db, 'google_client_id') || '';
+  const clientSecret = CLIENT_SECRET || getConfig(db, 'google_client_secret') || '';
+
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI);
   oauth2Client.setCredentials(tokens);
 
   oauth2Client.on('tokens', (newTokens) => {
     const current = getConfig(db, 'calendar_tokens');
     setConfig(db, 'calendar_tokens', { ...current, ...newTokens });
   });
+
+  // Force token refresh if expired
+  try {
+    const { credentials } = await oauth2Client.refreshAccessToken();
+    oauth2Client.setCredentials(credentials);
+    setConfig(db, 'calendar_tokens', credentials);
+  } catch (refreshErr: any) {
+    throw new Error(`Calendar token refresh failed: ${refreshErr.message}. Run: recall connect calendar`);
+  }
 
   const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 

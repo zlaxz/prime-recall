@@ -91,7 +91,6 @@ export async function indexDirectory(
         project: options.project || metadata.project || extracted.project,
         importance: extracted.importance,
         embedding,
-        artifact_path: filePath,
         metadata: { ...metadata, file_size: fileStat.size, extension: ext },
       };
 

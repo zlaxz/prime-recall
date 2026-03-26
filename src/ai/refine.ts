@@ -2,6 +2,9 @@ import type { Database as SqlJsDatabase } from 'sql.js';
 import { searchByText, getConfig, setConfig, saveDb, insertKnowledge, type KnowledgeItem } from '../db.js';
 import { learnBusinessContext } from './learn.js';
 import { getDefaultProvider } from './providers.js';
+import { buildHierarchy } from './hierarchy.js';
+import { buildConnections } from './connections.js';
+import { extractCommitments, updateCommitmentStates } from './commitments.js';
 
 /**
  * Continuous refinement — makes the knowledge base smarter over time.
@@ -23,12 +26,14 @@ export async function refineKnowledgeBase(
   reclassified: number;
   connectionsCreated: number;
   staleItems: number;
+  commitments: { extracted: number; skipped: number; newOverdue: number; newFulfilled: number; newDropped: number };
+  hierarchy: { episodes: number; semantics: number; themes: number; merged: number; split: number };
 }> {
   const apiKey = getConfig(db, 'openai_api_key');
   const provider = await getDefaultProvider(apiKey || undefined);
   const log = options.verbose ? console.log : () => {};
 
-  const stats = { contextUpdated: false, duplicatesMerged: 0, reclassified: 0, connectionsCreated: 0, staleItems: 0 };
+  const stats = { contextUpdated: false, duplicatesMerged: 0, reclassified: 0, connectionsCreated: 0, staleItems: 0, commitments: { extracted: 0, skipped: 0, newOverdue: 0, newFulfilled: 0, newDropped: 0 }, hierarchy: { episodes: 0, semantics: 0, themes: 0, merged: 0, split: 0 } };
 
   // ========================================================
   // 1. Re-learn business context
@@ -171,6 +176,57 @@ ${context}`,
   stmt.free();
   if (stats.staleItems > 0) {
     log(`  ⚠ ${stats.staleItems} items are 30+ days old (may need refresh)`);
+  }
+
+  // ========================================================
+  // 6. Extract and update commitments
+  // ========================================================
+  log('  📋 Extracting commitments...');
+  try {
+    const commitExtract = await extractCommitments(db, { verbose: options.verbose });
+    stats.commitments.extracted = commitExtract.extracted;
+    stats.commitments.skipped = commitExtract.skipped;
+    if (commitExtract.extracted > 0) {
+      log(`  ✓ Extracted ${commitExtract.extracted} commitments (${commitExtract.skipped} duplicates skipped)`);
+    }
+  } catch (err: any) {
+    log(`  ⚠ Commitment extraction failed: ${err.message}`);
+  }
+
+  log('  📋 Updating commitment states...');
+  try {
+    const stateUpdates = await updateCommitmentStates(db, { verbose: options.verbose });
+    stats.commitments.newOverdue = stateUpdates.newOverdue;
+    stats.commitments.newFulfilled = stateUpdates.newFulfilled;
+    stats.commitments.newDropped = stateUpdates.newDropped;
+    if (stateUpdates.newOverdue > 0 || stateUpdates.newFulfilled > 0 || stateUpdates.newDropped > 0) {
+      log(`  ✓ State updates: ${stateUpdates.newOverdue} overdue, ${stateUpdates.newFulfilled} fulfilled, ${stateUpdates.newDropped} dropped`);
+    }
+  } catch (err: any) {
+    log(`  ⚠ Commitment state update failed: ${err.message}`);
+  }
+
+  // ========================================================
+  // 7. Build knowledge hierarchy (episodes → semantics → themes)
+  // ========================================================
+  log('  🏗️ Building knowledge hierarchy...');
+  try {
+    stats.hierarchy = await buildHierarchy(db, { verbose: options.verbose });
+    log(`  ✓ Hierarchy: ${stats.hierarchy.themes} themes, ${stats.hierarchy.semantics} facts, ${stats.hierarchy.episodes} episodes`);
+  } catch (err: any) {
+    log(`  ⚠ Hierarchy build failed: ${err.message}`);
+  }
+
+  // ========================================================
+  // 8. Build connections graph
+  // ========================================================
+  log('  🔗 Building connections graph...');
+  try {
+    const connStats = await buildConnections(db, { verbose: options.verbose });
+    stats.connectionsCreated = connStats.total;
+    log(`  ✓ Connections: ${connStats.total} total (mentions: ${connStats.byType.mentions}, part_of: ${connStats.byType.part_of}, related_to: ${connStats.byType.related_to})`);
+  } catch (err: any) {
+    log(`  ⚠ Connections build failed: ${err.message}`);
   }
 
   return stats;
