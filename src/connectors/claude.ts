@@ -379,17 +379,26 @@ function extractArtifacts(messages: ClaudeMessage[]): { title: string; type: str
           artifactType = 'svg';
         }
 
-        // Try to infer title from first meaningful line or file_name
+        // Try to infer title — prefer export default, then named exports, then class/function
         let title = att.file_name || '';
         if (!title) {
-          // Look for component names, function names, or class names
-          const nameMatch = att.extracted_content.match(/(?:export default function|function|class|const)\s+(\w+)/);
-          if (nameMatch) {
-            title = nameMatch[1];
+          const exportDefault = att.extracted_content.match(/export\s+default\s+(?:function|class)\s+(\w+)/);
+          const namedExport = att.extracted_content.match(/export\s+(?:function|class|const)\s+(\w+)/);
+          const mainComponent = att.extracted_content.match(/(?:^|\n)function\s+([A-Z]\w+)/); // PascalCase = React component
+          const mainClass = att.extracted_content.match(/(?:^|\n)class\s+(\w+)/);
+
+          if (exportDefault) {
+            title = exportDefault[1];
+          } else if (mainComponent) {
+            title = mainComponent[1];
+          } else if (namedExport) {
+            title = namedExport[1];
+          } else if (mainClass) {
+            title = mainClass[1];
           } else {
-            // Use first non-empty line
-            const firstLine = att.extracted_content.split('\n').find((l: string) => l.trim().length > 5);
-            title = firstLine?.trim().slice(0, 60) || 'Attachment artifact';
+            // Use the conversation name as context + first meaningful line
+            const firstLine = att.extracted_content.split('\n').find((l: string) => l.trim().length > 10 && !l.trim().startsWith('import') && !l.trim().startsWith('const '));
+            title = firstLine?.trim().slice(0, 60) || 'Code artifact';
           }
         }
 

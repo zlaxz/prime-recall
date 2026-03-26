@@ -47,7 +47,7 @@ function createClaudeCodeProvider(): LLMProvider {
             '--max-turns', '1',
           ], {
             timeout: 120000,
-            env: { ...process.env },
+            env: { ...process.env, ANTHROPIC_API_KEY: '' }, // Force Max subscription auth, never paid API
             stdio: ['pipe', 'pipe', 'pipe'],
           });
 
