@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import { scanGmail } from './gmail.js';
 import { scanCalendar } from './calendar.js';
 import { scanClaude } from './claude.js';
+import { scanCowork } from './cowork.js';
 import { getConfig } from '../db.js';
 
 export interface SyncResult {
@@ -43,6 +44,17 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
       results.push({ source: 'claude', items });
     } catch (err: any) {
       results.push({ source: 'claude', items: 0, error: err.message });
+    }
+  }
+
+  // Cowork (Claude Desktop agent sessions)
+  const coworkConnected = getConfig(db, 'cowork_connected');
+  if (coworkConnected) {
+    try {
+      const { items } = await scanCowork(db, { days: 7, maxSessions: 50 });
+      results.push({ source: 'cowork', items });
+    } catch (err: any) {
+      results.push({ source: 'cowork', items: 0, error: err.message });
     }
   }
 

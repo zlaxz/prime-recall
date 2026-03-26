@@ -21,6 +21,8 @@ import { getAlerts, generatePrep, generateCatchup, getRelationshipHealth, genera
 import { connectCalendar, scanCalendar } from './connectors/calendar.js';
 import { indexDirectory } from './connectors/files.js';
 import { importClaudeConversations, connectClaude, scanClaude } from './connectors/claude.js';
+import { connectOtter, scanOtter } from './connectors/otter.js';
+import { connectCowork, scanCowork } from './connectors/cowork.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -453,8 +455,24 @@ program
       } else {
         console.log('  ✗ Failed to connect Claude.ai\n');
       }
+    } else if (source === 'cowork') {
+      console.log('\n⚡ Connecting Cowork (Claude Desktop agent mode)...\n');
+      const success = await connectCowork(db);
+
+      if (success) {
+        console.log('\n  Scanning Cowork sessions...\n');
+        const { sessions, items, skipped } = await scanCowork(db, { days: 90, maxSessions: 200 });
+
+        console.log(`\n  ✓ ${sessions} sessions → ${items} knowledge items`);
+        if (skipped > 0) console.log(`    ${skipped} sessions skipped (already indexed or too short)`);
+
+        const stats = getStats(db);
+        console.log(`\n  Total knowledge: ${stats.total_items} items\n`);
+      } else {
+        console.log('  ✗ Failed to connect Cowork\n');
+      }
     } else {
-      console.log(`  Unknown source: ${source}. Available: gmail, calendar, claude\n`);
+      console.log(`  Unknown source: ${source}. Available: gmail, calendar, claude, cowork\n`);
     }
   });
 
