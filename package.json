@@ -1,11 +1,11 @@
 {
-  "name": "@prime-ai/prime",
+  "name": "prime-recall",
   "version": "0.1.0",
   "description": "The AI that already knows your business. Connect your email, and in 60 seconds Prime knows every relationship, commitment, and dropped ball.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "prime": "dist/index.js"
+    "recall": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",

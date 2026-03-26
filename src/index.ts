@@ -15,7 +15,7 @@ import { importClaudeConversations } from './connectors/claude.js';
 const program = new Command();
 
 program
-  .name('prime')
+  .name('recall')
   .description('The AI that already knows your business')
   .version('0.1.0');
 

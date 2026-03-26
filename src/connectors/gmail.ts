@@ -23,7 +23,7 @@ export async function connectGmail(db: SqlJsDatabase): Promise<boolean> {
     access_type: 'offline',
     scope: SCOPES,
     prompt: 'consent',
-    login_hint: 'zach.stock@recaptureinsurance.com',
+    login_hint: getConfig(db, 'gmail_email') || '',
   });
 
   // Open browser
