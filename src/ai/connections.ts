@@ -94,18 +94,45 @@ export async function buildConnections(
   }));
 
   // ----------------------------------------------------------
-  // 1. mentions — shared contacts
+  // 1. mentions — shared contacts (excluding the user's own name)
   // ----------------------------------------------------------
   log('    Detecting mentions (shared contacts)...');
+
+  // Get user's email to identify and exclude their name from connections
+  const userEmail = getConfig(db, 'gmail_email') || '';
+  const userName = userEmail.split('@')[0]?.replace('.', ' ').toLowerCase() || '';
+
+  // Count contact frequency to identify high-frequency (low-signal) contacts
+  const contactFreq = new Map<string, number>();
+  for (const item of parsed) {
+    for (const c of item._contacts) {
+      contactFreq.set(c, (contactFreq.get(c) || 0) + 1);
+    }
+  }
+  // Contacts appearing in >30% of items are too common to be useful signals
+  const commonThreshold = parsed.length * 0.3;
+
   for (let i = 0; i < parsed.length; i++) {
     for (let j = i + 1; j < parsed.length; j++) {
       const a = parsed[i];
       const b = parsed[j];
       if (a._contacts.length === 0 || b._contacts.length === 0) continue;
 
-      const shared = a._contacts.filter((c: string) => b._contacts.includes(c));
-      if (shared.length > 0) {
-        const maxContacts = Math.max(a._contacts.length, b._contacts.length);
+      // Filter out the user and overly common contacts
+      const meaningful = (contacts: string[]) => contacts.filter((c: string) => {
+        const lower = c.toLowerCase();
+        if (lower.includes(userName) && userName.length > 3) return false; // exclude user
+        if ((contactFreq.get(c) || 0) > commonThreshold) return false; // exclude too-common
+        return true;
+      });
+
+      const aMeaningful = meaningful(a._contacts);
+      const bMeaningful = meaningful(b._contacts);
+      const shared = aMeaningful.filter((c: string) => bMeaningful.includes(c));
+
+      // Require 2+ shared meaningful contacts for a connection
+      if (shared.length >= 2) {
+        const maxContacts = Math.max(aMeaningful.length, bMeaningful.length);
         const confidence = shared.length / maxContacts;
         insertConnection(db, {
           id: uuid(),

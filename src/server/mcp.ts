@@ -31,31 +31,35 @@ server.tool(
     limit: z.number().optional().default(10).describe("Max results"),
     source: z.string().optional().describe("Filter: gmail, calendar, otter, claude, file, manual"),
     project: z.string().optional().describe("Filter by project name"),
+    strategy: z.enum(["auto", "semantic", "keyword", "graph", "temporal", "hierarchical"]).optional().default("auto").describe("Search strategy"),
   },
-  async ({ query, limit, source, project }) => {
+  async ({ query, limit, source, project, strategy }) => {
     const db = getDb();
-    const apiKey = getConfig(db, 'openai_api_key');
-    let results: any[];
-    if (apiKey) {
-      try {
-        const queryEmb = await generateEmbedding(query, apiKey);
-        results = searchByEmbedding(db, queryEmb, limit || 10, 0.3);
-      } catch {
-        results = searchByText(db, query, limit || 10);
-      }
-    } else {
-      results = searchByText(db, query, limit || 10);
-    }
-    if (source) results = results.filter(r => r.source === source);
-    if (project) results = results.filter(r => r.project?.toLowerCase().includes(project.toLowerCase()));
+    const { search } = await import('../ai/search.js');
 
+    const searchResult = await search(db, query, {
+      limit: limit || 10,
+      strategy: strategy || 'auto',
+      source,
+      project,
+      rerank: true,
+    });
+
+    const results = searchResult.items;
     const now = new Date();
+
+    let header = '';
+    if (results.length > 0) {
+      const conf = (searchResult.confidence * 100).toFixed(0);
+      header = `Search: ${searchResult.strategy_used} | Confidence: ${conf}% | Recency: ${searchResult.coverage.recency} | Agreement: ${searchResult.coverage.agreement}\n\n`;
+    }
+
     const text = results.length === 0
       ? `No results found for "${query}"`
-      : results.map((r, i) => {
-          const sim = r.similarity ? ` (${(r.similarity * 100).toFixed(0)}%)` : '';
-          const contacts = Array.isArray(r.contacts) ? r.contacts : JSON.parse(r.contacts || '[]');
-          const commitments = Array.isArray(r.commitments) ? r.commitments : JSON.parse(r.commitments || '[]');
+      : header + results.map((r, i) => {
+          const score = r._score != null ? ` (${(r._score * 100).toFixed(0)}%)` : (r.similarity ? ` (${(r.similarity * 100).toFixed(0)}%)` : '');
+          const contacts = Array.isArray(r.contacts) ? r.contacts : (() => { try { return JSON.parse(r.contacts || '[]'); } catch { return []; } })();
+          const commitments = Array.isArray(r.commitments) ? r.commitments : (() => { try { return JSON.parse(r.commitments || '[]'); } catch { return []; } })();
 
           // Date and staleness
           let dateInfo = '';
@@ -67,11 +71,12 @@ server.tool(
             else if (daysAgo > 0) dateInfo += ` (${daysAgo}d ago)`;
           }
 
-          let entry = `[${i + 1}] ${r.title}${sim}`;
+          let entry = `[${i + 1}] ${r.title}${score}`;
           entry += `\n   ${r.summary}`;
           entry += `\n   Source: ${r.source} | Date: ${dateInfo || 'unknown'}${r.project ? ` | Project: ${r.project}` : ''}`;
           if (contacts.length) entry += `\n   Contacts: ${contacts.join(', ')}`;
           if (commitments.length) entry += `\n   Commitments: ${commitments.join('; ')}`;
+          if (r._via) entry += `\n   Via: ${r._via}`;
           return entry;
         }).join('\n\n');
     return { content: [{ type: "text" as const, text }] };

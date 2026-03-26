@@ -1,11 +1,13 @@
 import type Database from 'better-sqlite3';
-import { searchByEmbedding, searchByText, getConfig } from '../db.js';
-import { generateEmbedding } from '../embedding.js';
+import { getConfig } from '../db.js';
 import { getDefaultProvider } from './providers.js';
+import { search } from './search.js';
 
 export interface AskResult {
   answer: string;
   sources: { id: string; num: number; title: string; source: string; source_ref: string; similarity?: number }[];
+  confidence?: number;
+  coverage?: { sources_found: number; recency: string; agreement: string };
 }
 
 export async function ask(
@@ -27,26 +29,9 @@ export async function askWithSources(
 
   const businessContext = getConfig(db, 'business_context') || '';
 
-  // Semantic search for relevant knowledge (still needs OpenAI for embeddings)
-  let relevantItems: any[] = [];
-  if (apiKey) {
-    try {
-      const queryEmb = await generateEmbedding(question, apiKey);
-      relevantItems = searchByEmbedding(db, queryEmb, 15, 0.25);
-    } catch {
-      relevantItems = searchByText(db, question, 15);
-    }
-  } else {
-    relevantItems = searchByText(db, question, 15);
-  }
-
-  // Also do text search to catch exact matches
-  const textResults = searchByText(db, question, 10);
-  for (const tr of textResults) {
-    if (!relevantItems.find(r => r.id === tr.id)) {
-      relevantItems.push(tr);
-    }
-  }
+  // Multi-strategy search with reranking
+  const searchResult = await search(db, question, { limit: 15, rerank: true });
+  const relevantItems = searchResult.items;
 
   // Number each source for citation
   const sources = relevantItems.map((item, idx) => ({
@@ -92,7 +77,9 @@ export async function askWithSources(
 
 Today's date: ${todayStr}
 
-${businessContext ? `BUSINESS CONTEXT:\n${businessContext}\n\n` : ''}KNOWLEDGE BASE (${relevantItems.length} sources):
+${businessContext ? `BUSINESS CONTEXT:\n${businessContext}\n\n` : ''}SEARCH QUALITY: confidence=${(searchResult.confidence * 100).toFixed(0)}%, recency=${searchResult.coverage.recency}, agreement=${searchResult.coverage.agreement}, strategy=${searchResult.strategy_used}
+
+KNOWLEDGE BASE (${relevantItems.length} sources):
 
 ${knowledgeContext || 'No relevant knowledge found.'}
 
@@ -116,5 +103,5 @@ RULES — INFORMATION QUALITY:
     { temperature: 0.3, max_tokens: 2000 }
   );
 
-  return { answer, sources };
+  return { answer, sources, confidence: searchResult.confidence, coverage: searchResult.coverage };
 }

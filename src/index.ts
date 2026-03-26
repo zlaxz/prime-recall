@@ -4,6 +4,7 @@ import 'dotenv/config';
 import { Command } from 'commander';
 import { getDb, getStats, setConfig, getConfig, searchByText, searchByEmbedding, insertKnowledge, getAllKnowledge, updateKnowledgeExtraction, type KnowledgeItem } from './db.js';
 import { generateEmbedding } from './embedding.js';
+// search() is dynamically imported in the search command via import('./ai/search.js')
 import { extractIntelligence } from './ai/extract.js';
 import { askWithSources } from './ai/ask.js';
 import { startServer } from './server/index.js';
@@ -158,48 +159,45 @@ program
 // ============================================================
 program
   .command('search <query>')
-  .description('Search your knowledge base')
+  .description('Search your knowledge base with multi-strategy search')
   .option('-l, --limit <n>', 'Max results', '10')
   .option('-s, --source <source>', 'Filter by source')
   .option('-p, --project <project>', 'Filter by project')
+  .option('--strategy <strategy>', 'Search strategy: auto, semantic, keyword, graph, temporal, hierarchical', 'auto')
+  .option('--since <date>', 'Only items after this ISO date')
+  .option('--no-rerank', 'Skip Claude reranking')
   .action(async (query: string, opts: any) => {
     const db = getDb();
-    const apiKey = getConfig(db, 'openai_api_key');
     const limit = parseInt(opts.limit) || 10;
 
-    let results: any[];
+    const { search } = await import('./ai/search.js');
 
-    if (apiKey) {
-      // Semantic search
-      try {
-        const queryEmb = await generateEmbedding(query, apiKey);
-        results = searchByEmbedding(db, queryEmb, limit, 0.3);
-      } catch {
-        // Fallback to text search
-        results = searchByText(db, query, limit);
-      }
-    } else {
-      results = searchByText(db, query, limit);
-    }
+    const searchResult = await search(db, query, {
+      limit,
+      strategy: opts.strategy || 'auto',
+      source: opts.source,
+      project: opts.project,
+      since: opts.since,
+      rerank: opts.rerank !== false,
+    });
 
-    // Apply filters
-    if (opts.source) {
-      results = results.filter(r => r.source === opts.source);
-    }
-    if (opts.project) {
-      results = results.filter(r => r.project?.toLowerCase().includes(opts.project.toLowerCase()));
-    }
+    const results = searchResult.items;
 
     if (results.length === 0) {
       console.log(`\n  No results for "${query}"\n`);
       return;
     }
 
-    console.log(`\n  Found ${results.length} results for "${query}":\n`);
+    // Show search metadata
+    const conf = (searchResult.confidence * 100).toFixed(0);
+    const cov = searchResult.coverage;
+    console.log(`\n  Found ${results.length} results for "${query}"`);
+    console.log(`  Strategy: ${searchResult.strategy_used} | Confidence: ${conf}% | Recency: ${cov.recency} | Agreement: ${cov.agreement}\n`);
 
     for (const r of results) {
-      const sim = r.similarity ? ` [${(r.similarity * 100).toFixed(0)}%]` : '';
+      const score = r._score != null ? ` [${(r._score * 100).toFixed(0)}%]` : (r.similarity ? ` [${(r.similarity * 100).toFixed(0)}%]` : '');
       const imp = r.importance !== 'normal' ? ` ⚡${r.importance}` : '';
+      const via = r._via ? ` (via: ${r._via})` : '';
 
       // Calculate age and staleness
       let dateStr = '';
@@ -213,11 +211,11 @@ program
         else if (daysAgo > 0) dateStr += ` (${daysAgo}d ago)`;
       }
 
-      console.log(`  ${sim} ${r.title}${imp}`);
+      console.log(`  ${score} ${r.title}${imp}${via}`);
       console.log(`     ${r.summary}`);
       console.log(`     📎 ${r.source} | ${dateStr}${staleWarning}${r.project ? ` | 📁 ${r.project}` : ''}`);
-      if (r.contacts?.length) console.log(`     👤 ${r.contacts.join(', ')}`);
-      if (r.commitments?.length) console.log(`     📋 ${r.commitments.join('; ')}`);
+      if (r.contacts?.length) console.log(`     👤 ${(Array.isArray(r.contacts) ? r.contacts : []).join(', ')}`);
+      if (r.commitments?.length) console.log(`     📋 ${(Array.isArray(r.commitments) ? r.commitments : []).join('; ')}`);
       console.log('');
     }
   });
