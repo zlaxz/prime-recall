@@ -371,7 +371,7 @@ program
 // ============================================================
 program
   .command('connect')
-  .argument('<source>', 'Source to connect (gmail, calendar, claude)')
+  .argument('<source>', 'Source to connect (gmail, calendar, claude, otter, cowork)')
   .description('Connect a data source')
   .option('--session-key <key>', 'Session key for Claude.ai (avoids Keychain/manual entry)')
   .action(async (source: string, opts: any) => {
