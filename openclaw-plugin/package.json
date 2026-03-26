@@ -1,0 +1,19 @@
+{
+  "name": "@prime-recall/openclaw-plugin",
+  "version": "0.1.0",
+  "description": "Prime Recall plugin for OpenClaw — persistent business knowledge for AI agents",
+  "type": "module",
+  "main": "index.ts",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  },
+  "keywords": ["openclaw", "memory", "knowledge-base", "ai-agents", "prime-recall"],
+  "author": "Zach Stock",
+  "license": "MIT",
+  "peerDependencies": {
+    "openclaw": ">=2026.3.0"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.0"
+  }
+}
