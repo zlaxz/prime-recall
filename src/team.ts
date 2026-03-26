@@ -245,22 +245,30 @@ export async function runAgent(
 
   const background = options.background !== false;
 
+  // Write prompt to temp file (too long for CLI args)
+  const { writeFileSync, unlinkSync: unlinkTmp } = await import('fs');
+  const { tmpdir } = await import('os');
+  const promptPath = join(tmpdir(), `prime-agent-${name}-${Date.now()}.txt`);
+  writeFileSync(promptPath, prompt);
+
+  const claudeArgs = ['-p', `$(cat "${promptPath}")`, '--allowedTools', 'mcp__prime-recall__*'];
+
   if (background) {
-    const child = spawn('claude', ['-p', prompt, '--allowedTools', 'mcp__prime-recall__*'], {
+    // Use shell to expand the cat command
+    const child = spawn('sh', ['-c', `claude -p "$(cat '${promptPath}')" --allowedTools 'mcp__prime-recall__*' && rm -f '${promptPath}'`], {
       detached: true,
       stdio: 'ignore',
       env: { ...process.env },
     });
     child.unref();
 
-    // Update last run
     agent.last_run = new Date().toISOString();
     saveAgent(agent);
 
     return { status: 'running' };
   } else {
     try {
-      const { stdout } = await execFileAsync('claude', ['-p', prompt, '--allowedTools', 'mcp__prime-recall__*'], {
+      const { stdout } = await execFileAsync('sh', ['-c', `claude -p "$(cat '${promptPath}')" --allowedTools 'mcp__prime-recall__*'`], {
         timeout: 300000,
         env: { ...process.env },
       });
@@ -269,8 +277,10 @@ export async function runAgent(
       agent.last_report = stdout.slice(0, 500);
       saveAgent(agent);
 
+      try { unlinkTmp(promptPath); } catch {}
       return { status: 'completed', output: stdout };
     } catch (err: any) {
+      try { unlinkTmp(promptPath); } catch {}
       return { status: 'error', output: err.message?.slice(0, 500) };
     }
   }
