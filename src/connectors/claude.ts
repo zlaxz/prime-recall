@@ -606,26 +606,56 @@ export async function scanClaude(
     } else if (entry.type === 'artifact' && entry.artifactIdx !== undefined) {
       const artifact = artifacts[entry.artifactIdx!];
 
+      // Check for existing versions of this artifact (by title match)
+      const existingVersions = db.prepare(
+        "SELECT id, source_date, metadata FROM knowledge WHERE title LIKE ? AND source = 'claude' AND tags LIKE '%claude-artifact%' ORDER BY source_date DESC"
+      ).all(`Artifact: ${artifact.title}%`) as any[];
+
+      const versionNum = existingVersions.length + 1;
+      const isUpdate = existingVersions.length > 0;
+
+      // Mark previous versions as superseded
+      if (isUpdate) {
+        const latestPrev = existingVersions[0];
+        db.prepare(
+          "UPDATE knowledge SET valid_until = datetime('now'), superseded_by = ?, importance = 'low' WHERE id = ?"
+        ).run(`artifact-v${versionNum}`, latestPrev.id);
+      }
+
+      // Store more content in the summary for better searchability
+      const contentPreview = artifact.content.slice(0, 800).replace(/\n/g, ' ').trim();
+
       const artifactItem: KnowledgeItem = {
         id: uuid(),
-        title: `Artifact: ${artifact.title}`,
-        summary: `${artifact.type} artifact from conversation "${convo.name || 'Untitled'}". ${artifact.content.slice(0, 200)}...`,
+        title: `Artifact: ${artifact.title}${versionNum > 1 ? ` (v${versionNum})` : ''}`,
+        summary: `${artifact.type} artifact${isUpdate ? ` (version ${versionNum}, updated)` : ''} from conversation "${convo.name || 'Untitled'}". Content: ${contentPreview}`,
         source: 'claude',
         source_ref: `claude-artifact:${convo.uuid}:${artifact.identifier}`,
         source_date: convo.updated_at || convo.created_at,
         contacts: extracted.contacts,
         organizations: extracted.organizations,
-        tags: ['claude-artifact', `artifact-type:${artifact.type}`, ...(projectName ? [projectName] : [])],
+        tags: [
+          'claude-artifact',
+          `artifact-type:${artifact.type}`,
+          ...(projectName ? [projectName] : []),
+          ...(isUpdate ? ['updated-artifact', `version:${versionNum}`] : ['new-artifact']),
+          ...(artifact.title.toLowerCase().includes('brand') ? ['branding'] : []),
+          ...(artifact.title.toLowerCase().includes('logo') ? ['branding', 'logo'] : []),
+        ],
         project: projectName || extracted.project || undefined,
-        importance: 'normal',
+        importance: isUpdate ? 'high' : 'normal', // Updates are more important — they represent the latest
         embedding,
-        artifact_path: `claude:${convo.uuid}/${artifact.identifier}`,
         metadata: {
           artifact_type: artifact.type,
           artifact_identifier: artifact.identifier,
           conversation_uuid: convo.uuid,
           conversation_name: convo.name,
           content_length: artifact.content.length,
+          content_preview: artifact.content.slice(0, 2000), // Store more content for retrieval
+          version: versionNum,
+          is_latest: true,
+          previous_version_id: existingVersions[0]?.id || null,
+          total_versions: versionNum,
         },
       };
 

@@ -1741,19 +1741,22 @@ program
 // ============================================================
 program
   .command('hire <name>')
-  .description('Hire a new AI agent (templates: cos, follow-up, deal-monitor, commitment-tracker)')
+  .description('Hire a new AI agent (templates: cos, follow-up, deal-monitor, commitment-tracker, project-pm)')
   .option('-r, --role <role>', 'Role title')
   .option('-s, --schedule <cron>', 'Cron schedule (e.g., "0 7 * * *" for 7am daily)')
   .option('-p, --project <project>', 'Project scope')
+  .option('-t, --template <template>', 'Use a template (project-pm, cos, follow-up, etc.)')
   .option('-n, --notify <level>', 'Minimum notification urgency: critical, high, normal, fyi')
   .option('--install', 'Install launchd schedule immediately')
   .action(async (name: string, opts: any) => {
     const { hireAgent, TEMPLATES, generateLaunchdPlist } = await import('./team.js');
 
     const template = TEMPLATES[name];
-    if (!template && !opts.role) {
+    const resolvedTemplate = opts.template ? TEMPLATES[opts.template] : template;
+    if (!resolvedTemplate && !opts.role) {
       console.log(`\n  No template for "${name}". Available: ${Object.keys(TEMPLATES).join(', ')}`);
-      console.log('  Or specify a role: recall hire myagent --role "Research Assistant"\n');
+      console.log('  Or specify a role: recall hire myagent --role "Research Assistant"');
+      console.log('  Or use a template: recall hire myagent --template project-pm --project "My Project"\n');
       return;
     }
 
@@ -1762,6 +1765,7 @@ program
       schedule: opts.schedule,
       project: opts.project,
       notify: opts.notify,
+      template: opts.template,
     });
 
     console.log(`\n  ✓ Hired: ${agent.role} (${agent.name})`);

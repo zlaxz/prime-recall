@@ -519,6 +519,67 @@ server.tool(
   }
 );
 
+server.tool(
+  "prime_get_artifact",
+  "Find the LATEST version of a Claude artifact by name. Use this BEFORE creating or editing any document, design, or code artifact to ensure you have the most recent version.",
+  {
+    query: z.string().describe("Artifact name or topic to search for (e.g., 'Carefront brand guidelines', 'agent flyer')"),
+    all_versions: z.boolean().optional().default(false).describe("Show all versions, not just latest"),
+  },
+  async ({ query, all_versions }) => {
+    const db = getDb();
+
+    // Search for artifacts matching the query
+    const allArtifacts = db.prepare(
+      `SELECT * FROM knowledge
+       WHERE tags LIKE '%claude-artifact%'
+       AND (title LIKE ? OR summary LIKE ? OR tags LIKE ?)
+       ORDER BY source_date DESC`
+    ).all(`%${query}%`, `%${query}%`, `%${query}%`) as any[];
+
+    if (allArtifacts.length === 0) {
+      return { content: [{ type: "text" as const, text: `No artifacts found matching "${query}". This may be a new artifact — create it fresh.` }] };
+    }
+
+    // Group by base title (strip version suffix)
+    const byTitle = new Map<string, any[]>();
+    for (const a of allArtifacts) {
+      const baseTitle = (a.title as string).replace(/\s*\(v\d+\)$/, '').replace(/^Artifact:\s*/, '');
+      const group = byTitle.get(baseTitle) || [];
+      group.push(a);
+      byTitle.set(baseTitle, group);
+    }
+
+    let text = '';
+    for (const [title, versions] of byTitle) {
+      const latest = versions[0]; // Already sorted by date DESC
+      const meta = typeof latest.metadata === 'string' ? JSON.parse(latest.metadata) : (latest.metadata || {});
+
+      text += `## ${title}\n`;
+      text += `Latest version: v${meta.version || 1} | ${latest.source_date} | ${meta.artifact_type || 'unknown'}\n`;
+      text += `Project: ${latest.project || 'none'} | Conversation: ${meta.conversation_name || 'unknown'}\n`;
+      text += `Source: ${latest.source_ref}\n`;
+
+      if (meta.content_preview) {
+        text += `\nContent:\n${meta.content_preview}\n`;
+      } else {
+        text += `\nSummary: ${latest.summary}\n`;
+      }
+
+      if (all_versions && versions.length > 1) {
+        text += `\nVersion history (${versions.length} versions):\n`;
+        for (const v of versions) {
+          const vm = typeof v.metadata === 'string' ? JSON.parse(v.metadata) : (v.metadata || {});
+          text += `  v${vm.version || '?'} — ${v.source_date} — ${vm.conversation_name || 'unknown'}\n`;
+        }
+      }
+      text += '\n---\n\n';
+    }
+
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
