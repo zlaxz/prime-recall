@@ -250,45 +250,113 @@ export async function runAgent(
 
   const background = options.background !== false;
 
-  // Write prompt to temp file (too long for CLI args)
-  const { writeFileSync, readFileSync: readTmp, unlinkSync: unlinkTmp } = await import('fs');
-  const { tmpdir } = await import('os');
-  const promptPath = join(tmpdir(), `prime-agent-${name}-${Date.now()}.txt`);
-  writeFileSync(promptPath, prompt);
+  // Run agent using OpenAI API with Prime Recall context
+  // Agent gathers context from the knowledge base, reasons over it, saves results
+  const db = getDb();
+  const apiKey = getConfig(db, 'openai_api_key');
+  if (!apiKey) return { status: 'error', output: 'No OpenAI API key. Run: recall init' };
+
+  const runAgentLogic = async (): Promise<string> => {
+    const client = new OpenAI({ apiKey });
+
+    // Step 1: Gather context for the agent
+    const alerts = getAlerts(db);
+    const alertSummary = alerts.slice(0, 20).map(a => `[${a.severity}] ${a.title}: ${a.detail}`).join('\n');
+
+    // Search for project-specific context if agent has a project
+    let projectContext = '';
+    if (agent.project) {
+      const items = searchByText(db, agent.project, 20);
+      projectContext = items.map((i: any) => `[${i.source}] ${i.title}: ${i.summary}`).join('\n');
+    }
+
+    // Get recent agent reports
+    const recentReports = searchByText(db, `agent:${name}`, 5);
+    const reportContext = recentReports.map((r: any) => `[${r.source_date}] ${r.title}: ${r.summary}`).join('\n');
+
+    const contextBlock = `
+CURRENT ALERTS (${alerts.length} total):
+${alertSummary || 'None'}
+
+${agent.project ? `PROJECT CONTEXT (${agent.project}):\n${projectContext}\n` : ''}
+YOUR PREVIOUS REPORTS:
+${reportContext || 'No previous reports — this is your first run.'}
+`;
+
+    // Step 2: LLM reasoning
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: prompt },
+        { role: 'user', content: `Here is your current context:\n${contextBlock}\n\nProduce your report now. Be specific, cite sources, and include an ACTION NEEDED section if the user must do something.` },
+      ],
+      temperature: 0.3,
+      max_tokens: 3000,
+    });
+
+    const report = response.choices[0]?.message?.content || 'No output generated.';
+
+    // Step 3: Save report to Prime Recall
+    const embText = `Agent report: ${name}\n${report.slice(0, 500)}`;
+    const embedding = await generateEmbedding(embText, apiKey);
+
+    const reportItem: KnowledgeItem = {
+      id: uuid(),
+      title: `[${agent.role}] Report — ${new Date().toLocaleDateString()}`,
+      summary: report.slice(0, 500),
+      source: 'agent-report',
+      source_ref: `agent-report:${name}:${Date.now()}`,
+      source_date: new Date().toISOString(),
+      tags: [`agent:${name}`, 'agent-report'],
+      project: agent.project,
+      importance: 'normal',
+      embedding,
+      metadata: {
+        agent: name,
+        role: agent.role,
+        full_report: report,
+      },
+    };
+    insertKnowledge(db, reportItem);
+
+    // Step 4: Notify if urgent items found
+    const hasUrgent = report.toLowerCase().includes('action needed') ||
+                      report.toLowerCase().includes('critical') ||
+                      report.toLowerCase().includes('overdue');
+    if (hasUrgent && (agent.notify === 'high' || agent.notify === 'critical')) {
+      const summary = report.split('\n').slice(0, 3).join(' ').slice(0, 200);
+      await notify(db, {
+        title: `${agent.role}: Action needed`,
+        body: summary,
+        urgency: 'high',
+        agent: name,
+        project: agent.project,
+        actionRequired: 'Review agent report in Prime Recall',
+      });
+    }
+
+    return report;
+  };
 
   if (background) {
-    const child = spawn('sh', [
-      '-c',
-      `cat '${promptPath}' | claude -p - --allowedTools 'mcp__prime-recall__*'; rm -f '${promptPath}'`,
-    ], {
-      detached: true,
-      stdio: 'ignore',
-      env: { ...process.env },
-    });
-    child.unref();
+    // Fire and forget
+    runAgentLogic().then(report => {
+      agent.last_run = new Date().toISOString();
+      agent.last_report = report.slice(0, 500);
+      saveAgent(agent);
+    }).catch(() => {});
 
     agent.last_run = new Date().toISOString();
     saveAgent(agent);
-
     return { status: 'running' };
   } else {
     try {
-      const { stdout } = await execFileAsync('sh', [
-        '-c',
-        `cat '${promptPath}' | claude -p - --allowedTools 'mcp__prime-recall__*'`,
-      ], {
-        timeout: 300000,
-        env: { ...process.env },
-      });
-
+      const report = await runAgentLogic();
       agent.last_run = new Date().toISOString();
-      agent.last_report = stdout.slice(0, 500);
+      agent.last_report = report.slice(0, 500);
       saveAgent(agent);
-
-      try { unlinkTmp(promptPath); } catch {}
-      return { status: 'completed', output: stdout };
+      return { status: 'completed', output: report };
     } catch (err: any) {
-      try { unlinkTmp(promptPath); } catch {}
       return { status: 'error', output: err.message?.slice(0, 500) };
     }
   }
