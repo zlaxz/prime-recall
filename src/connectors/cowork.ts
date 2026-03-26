@@ -300,14 +300,19 @@ export async function scanCowork(
       try {
         const extracted = await extractIntelligence(text, apiKey);
         return { session, extracted, taskName, text };
-      } catch {
+      } catch (err: any) {
+        console.error(`\n    ✗ Extraction failed for ${session.sessionName}: ${err.message}`);
         return null;
       }
     }));
 
-    for (const r of results) {
-      if (r) processed.push(r);
-      else stats.skipped++;
+    for (let j = 0; j < results.length; j++) {
+      const r = results[j];
+      if (r) {
+        processed.push(r);
+      } else {
+        stats.skipped++;
+      }
     }
     process.stdout.write(`\r  Extracted: ${Math.min(i + CONCURRENCY, sessionTexts.length)}/${sessionTexts.length}`);
   }

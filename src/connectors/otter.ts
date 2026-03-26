@@ -72,9 +72,13 @@ export function extractOtterCredentials(): OtterCredentials | null {
   }
 
   try {
-    // Dynamic import to avoid issues if better-sqlite3 isn't available
+    // Copy the cookie DB first — Otter holds a lock while running
+    const tmpPath = join(homedir(), '.prime', 'otter-cookies-tmp.db');
+    const { copyFileSync, unlinkSync } = require('fs');
+    copyFileSync(cookiePath, tmpPath);
+
     const BetterSqlite3 = require('better-sqlite3');
-    const cookieDb = new BetterSqlite3(cookiePath, { readonly: true });
+    const cookieDb = new BetterSqlite3(tmpPath, { readonly: true });
 
     const sessionRow = cookieDb.prepare(
       "SELECT value FROM cookies WHERE name='sessionid' AND host_key LIKE '%otter%'"
@@ -85,8 +89,10 @@ export function extractOtterCredentials(): OtterCredentials | null {
     ).get() as { value: string } | undefined;
 
     cookieDb.close();
+    try { unlinkSync(tmpPath); } catch {}
 
     if (!sessionRow?.value || !csrfRow?.value) {
+      console.log('    DEBUG: session=', sessionRow?.value?.slice(0, 10), 'csrf=', csrfRow?.value?.slice(0, 10));
       return null;
     }
 
