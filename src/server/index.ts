@@ -232,6 +232,161 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     });
   });
 
+  // ── Dashboard ────────────────────────────────────────────
+  app.get('/dashboard', (_req, res) => {
+    const stats = getStats(db);
+
+    // Get agent reports
+    const agentReports = db.prepare(
+      "SELECT * FROM knowledge WHERE source = 'agent-report' ORDER BY source_date DESC LIMIT 10"
+    ).all() as any[];
+
+    // Get alerts
+    const alertItems = db.prepare(
+      "SELECT * FROM knowledge WHERE source = 'agent-notification' ORDER BY source_date DESC LIMIT 10"
+    ).all() as any[];
+
+    // Get team config
+    const { readdirSync, readFileSync, existsSync } = require('fs');
+    const { join } = require('path');
+    const { homedir } = require('os');
+    const agentsDir = join(homedir(), '.prime', 'agents');
+    let agents: any[] = [];
+    if (existsSync(agentsDir)) {
+      agents = readdirSync(agentsDir)
+        .filter((f: string) => f.endsWith('.json'))
+        .map((f: string) => {
+          try { return JSON.parse(readFileSync(join(agentsDir, f), 'utf-8')); } catch { return null; }
+        })
+        .filter(Boolean);
+    }
+
+    const formatAge = (dateStr: string) => {
+      if (!dateStr) return 'never';
+      const h = Math.floor((Date.now() - new Date(dateStr).getTime()) / 3600000);
+      if (h < 1) return 'just now';
+      if (h < 24) return `${h}h ago`;
+      return `${Math.floor(h / 24)}d ago`;
+    };
+
+    const reportCards = agentReports.map(r => {
+      const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
+      const fullReport = (meta.full_report || r.summary || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `
+        <div class="card">
+          <div class="card-header">
+            <span class="badge">${meta.agent || '?'}</span>
+            <span class="age">${formatAge(r.source_date)}</span>
+          </div>
+          <h3>${(r.title || '').replace(/</g, '&lt;')}</h3>
+          <pre class="report">${fullReport}</pre>
+        </div>`;
+    }).join('');
+
+    const teamCards = agents.map((a: any) => `
+      <div class="team-member">
+        <span class="status ${a.enabled ? 'active' : 'disabled'}"></span>
+        <strong>${a.role}</strong> (${a.name})
+        <div class="meta">
+          Schedule: ${a.schedule} | Last run: ${formatAge(a.last_run)} | Notify: ${a.notify}+
+          ${a.project ? `<br>Project: ${a.project}` : ''}
+        </div>
+      </div>`).join('');
+
+    const alertCards = alertItems.map(a => {
+      const meta = typeof a.metadata === 'string' ? JSON.parse(a.metadata) : (a.metadata || {});
+      return `
+        <div class="alert-item ${meta.urgency || 'normal'}">
+          <strong>${(a.title || '').replace(/</g, '&lt;')}</strong>
+          <span class="age">${formatAge(a.source_date)}</span>
+        </div>`;
+    }).join('') || '<p class="muted">No recent notifications</p>';
+
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <title>Prime Recall — Dashboard</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="120">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, system-ui, sans-serif; background: #0a0a1a; color: #e0e0e0; padding: 20px; }
+    h1 { font-size: 24px; margin-bottom: 4px; }
+    .subtitle { color: #888; font-size: 14px; margin-bottom: 24px; }
+    .grid { display: grid; grid-template-columns: 1fr 320px; gap: 20px; }
+    .sidebar { display: flex; flex-direction: column; gap: 16px; }
+
+    .section { margin-bottom: 24px; }
+    .section h2 { font-size: 16px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; border-bottom: 1px solid #222; padding-bottom: 8px; }
+
+    .stats { display: flex; gap: 16px; margin-bottom: 24px; }
+    .stat { background: #111; border: 1px solid #222; border-radius: 8px; padding: 16px; flex: 1; text-align: center; }
+    .stat .number { font-size: 32px; font-weight: bold; color: #fff; }
+    .stat .label { font-size: 12px; color: #888; margin-top: 4px; }
+
+    .card { background: #111; border: 1px solid #222; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .card h3 { font-size: 15px; margin-bottom: 8px; color: #fff; }
+    .badge { background: #2a2a4a; color: #8888ff; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+    .age { color: #666; font-size: 12px; }
+    .report { font-size: 13px; line-height: 1.5; color: #bbb; white-space: pre-wrap; max-height: 400px; overflow-y: auto; }
+
+    .team-member { background: #111; border: 1px solid #222; border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+    .team-member .meta { font-size: 12px; color: #666; margin-top: 4px; }
+    .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .status.active { background: #4ade80; }
+    .status.disabled { background: #666; }
+
+    .alert-item { padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; font-size: 13px; display: flex; justify-content: space-between; }
+    .alert-item.critical { background: #2a0a0a; border-left: 3px solid #ef4444; }
+    .alert-item.high { background: #2a1a0a; border-left: 3px solid #f97316; }
+    .alert-item.normal { background: #0a1a2a; border-left: 3px solid #3b82f6; }
+    .muted { color: #555; font-size: 13px; }
+
+    @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Prime Recall</h1>
+  <p class="subtitle">${stats.total_items} knowledge items · ${agents.length} agents · Auto-refreshes every 2 min</p>
+
+  <div class="stats">
+    <div class="stat"><div class="number">${stats.total_items}</div><div class="label">Knowledge Items</div></div>
+    <div class="stat"><div class="number">${agents.length}</div><div class="label">AI Employees</div></div>
+    <div class="stat"><div class="number">${agentReports.length}</div><div class="label">Recent Reports</div></div>
+    <div class="stat"><div class="number">${alertItems.length}</div><div class="label">Notifications</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="main">
+      <div class="section">
+        <h2>Agent Reports</h2>
+        ${reportCards || '<p class="muted">No agent reports yet. Run: recall run-agent cos</p>'}
+      </div>
+    </div>
+
+    <div class="sidebar">
+      <div class="section">
+        <h2>Your Team</h2>
+        ${teamCards || '<p class="muted">No agents hired</p>'}
+      </div>
+
+      <div class="section">
+        <h2>Notifications</h2>
+        ${alertCards}
+      </div>
+
+      <div class="section">
+        <h2>Sources</h2>
+        ${(stats.by_source || []).map((s: any) => `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px;"><span>${s.source}</span><span style="color:#888">${s.count}</span></div>`).join('')}
+      </div>
+    </div>
+  </div>
+</body>
+</html>`);
+  });
+
   app.listen(port, () => {
     const stats = getStats(db);
     console.log(`\n⚡ Prime API server running on http://localhost:${port}`);
