@@ -634,6 +634,17 @@ program
       }
     }
 
+    const otterSession = getConfig(db, 'otter_session_id');
+    if (otterSession) {
+      console.log('  Syncing Otter.ai...');
+      try {
+        const { meetings, items } = await scanOtter(db, { days: 7, maxMeetings: 50 });
+        console.log(`  ✓ Otter: ${meetings} meetings → ${items} items`);
+      } catch (err: any) {
+        console.log(`  ⚠ Otter sync failed: ${err.message}`);
+      }
+    }
+
     const stats = getStats(db);
     console.log(`\n  Total knowledge: ${stats.total_items} items\n`);
   });
