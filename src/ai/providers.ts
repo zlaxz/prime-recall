@@ -1,6 +1,9 @@
 import OpenAI from 'openai';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
+import { writeFileSync, unlinkSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 const execFileAsync = promisify(execFile);
 
@@ -36,14 +39,31 @@ function createClaudeCodeProvider(): LLMProvider {
       }
 
       try {
-        const { stdout } = await execFileAsync('claude', [
-          '-p', prompt,
-          '--output-format', 'json',
-          '--max-turns', '1',
-        ], {
-          timeout: 120000, // 2 minute timeout
-          maxBuffer: 10 * 1024 * 1024, // 10MB
-          env: { ...process.env },
+        // Use stdin piping to avoid shell arg length limits with large prompts
+        const stdout = await new Promise<string>((resolve, reject) => {
+          const proc = spawn('claude', [
+            '-p', '-',
+            '--output-format', 'json',
+            '--max-turns', '1',
+          ], {
+            timeout: 120000,
+            env: { ...process.env },
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+
+          let out = '';
+          let err = '';
+          proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+          proc.stderr.on('data', (d: Buffer) => { err += d.toString(); });
+          proc.on('close', (code) => {
+            if (code === 0) resolve(out);
+            else reject(new Error(`claude -p exited with ${code}: ${err.slice(0, 200)}`));
+          });
+          proc.on('error', reject);
+
+          // Write prompt to stdin
+          proc.stdin.write(prompt);
+          proc.stdin.end();
         });
 
         // Parse the JSON envelope from claude CLI

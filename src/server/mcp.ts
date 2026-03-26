@@ -438,6 +438,82 @@ server.tool(
   }
 );
 
+server.tool(
+  "prime_notify",
+  "Send a notification to the user. Routes by urgency: CRITICAL → iMessage + email, HIGH → iMessage, NORMAL → email, FYI → save only. Use when an agent has something important to communicate.",
+  {
+    title: z.string().describe("Short notification title"),
+    body: z.string().describe("Notification body — what happened and why it matters"),
+    urgency: z.enum(["critical", "high", "normal", "fyi"]).describe("Notification urgency"),
+    agent: z.string().optional().describe("Which agent is sending (e.g., 'carefront-pm')"),
+    project: z.string().optional().describe("Related project"),
+    action_required: z.string().optional().describe("What the user needs to do"),
+  },
+  async ({ title, body, urgency, agent, project, action_required }) => {
+    const db = getDb();
+    const { notify } = await import('../notify.js');
+    const result = await notify(db, {
+      title, body, urgency: urgency as any,
+      agent, project, actionRequired: action_required,
+    });
+    const text = result.channels.length > 0
+      ? `✓ Notified via: ${result.channels.join(', ')}${result.errors.length ? ` (errors: ${result.errors.join('; ')})` : ''}`
+      : `⚠ No channels available. ${result.errors.join('; ')}`;
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+server.tool(
+  "prime_spawn_agent",
+  "Spawn an agent to work on a task in the background. The agent has full access to Prime Recall and will save its report when done. Use for research, drafting, analysis, or any work the user delegates.",
+  {
+    task: z.string().describe("What the agent should do — be specific"),
+    agent: z.string().optional().describe("Agent type: 'cos', 'follow-up', or custom name (default: 'research')"),
+    project: z.string().optional().describe("Project context"),
+    urgency: z.enum(["critical", "high", "normal", "fyi"]).optional().describe("Task urgency"),
+  },
+  async ({ task, agent, project, urgency }) => {
+    const db = getDb();
+    const { spawnAgent } = await import('../agents.js');
+    const result = await spawnAgent(db, {
+      task, agent, project, urgency: urgency as any, background: true,
+    });
+    if (result.status === 'spawned') {
+      return { content: [{ type: "text" as const, text: `✓ Agent "${agent || 'research'}" spawned.\nTask: ${task}\nID: ${result.taskId}\n\nThe agent will save its report to Prime Recall when done. Ask me "what did the agent find?" to check.` }] };
+    } else {
+      return { content: [{ type: "text" as const, text: `✗ Failed to spawn agent: ${result.result}` }] };
+    }
+  }
+);
+
+server.tool(
+  "prime_agent_activity",
+  "Show recent agent activity — reports, notifications, and pending tasks. Use when the user asks 'what did my agents do?' or 'any updates?'",
+  {
+    agent: z.string().optional().describe("Filter by specific agent name"),
+    limit: z.number().optional().default(10).describe("Number of items to show"),
+  },
+  async ({ agent, limit }) => {
+    const db = getDb();
+    const { getAgentActivity } = await import('../agents.js');
+    const activity = getAgentActivity(db, { agent, limit });
+
+    if (activity.length === 0) {
+      return { content: [{ type: "text" as const, text: "No recent agent activity." }] };
+    }
+
+    const text = activity.map(a => {
+      const tags = a.tags || [];
+      const meta = a.metadata || {};
+      const age = a.source_date ? `${Math.floor((Date.now() - new Date(a.source_date).getTime()) / 3600000)}h ago` : '';
+      const agentName = meta.agent || tags.find((t: string) => t.startsWith('agent:'))?.replace('agent:', '') || '?';
+      return `[${agentName}] ${a.title} (${age})\n  ${a.summary?.slice(0, 200)}`;
+    }).join('\n\n');
+
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

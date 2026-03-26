@@ -1619,4 +1619,91 @@ Do NOT answer from memory or general knowledge when Prime Recall has the data. S
     console.log('  → Claude will automatically search your knowledge base\n');
   });
 
+// ============================================================
+// prime agent <task>
+// ============================================================
+program
+  .command('agent <task>')
+  .description('Spawn an agent to work on a task')
+  .option('-a, --agent <name>', 'Agent type: cos, follow-up, or custom name', 'research')
+  .option('-p, --project <project>', 'Project context')
+  .option('--sync', 'Run synchronously (wait for result)')
+  .action(async (task: string, opts: any) => {
+    const db = await getDb();
+    const { spawnAgent } = await import('./agents.js');
+
+    console.log(`\n⚡ Spawning agent "${opts.agent}"...\n`);
+    const result = await spawnAgent(db, {
+      task,
+      agent: opts.agent,
+      project: opts.project,
+      background: !opts.sync,
+    });
+
+    if (result.status === 'spawned') {
+      console.log(`  ✓ Agent spawned (task: ${result.taskId.slice(0, 8)}...)`);
+      console.log(`  Working in background. Check: recall agents\n`);
+    } else if (result.status === 'completed') {
+      console.log(`  ✓ Completed:\n`);
+      console.log(result.result);
+    } else {
+      console.log(`  ✗ Error: ${result.result}\n`);
+    }
+  });
+
+// ============================================================
+// prime agents — list agent activity
+// ============================================================
+program
+  .command('agents')
+  .description('Show recent agent activity — reports, tasks, notifications')
+  .option('-a, --agent <name>', 'Filter by agent name')
+  .option('-l, --limit <n>', 'Number of items', '15')
+  .action(async (opts: any) => {
+    const db = await getDb();
+    const { getAgentActivity } = await import('./agents.js');
+    const activity = getAgentActivity(db, {
+      agent: opts.agent,
+      limit: parseInt(opts.limit) || 15,
+    });
+
+    if (activity.length === 0) {
+      console.log('\n  No recent agent activity.\n');
+      return;
+    }
+
+    console.log(`\n⚡ AGENT ACTIVITY (${activity.length} items)\n`);
+
+    for (const a of activity) {
+      const tags = a.tags || [];
+      const meta = a.metadata || {};
+      const agentName = meta.agent || tags.find((t: string) => t.startsWith('agent:'))?.replace('agent:', '') || '?';
+      const status = tags.find((t: string) => t.startsWith('status:'))?.replace('status:', '') || '';
+      const age = a.source_date
+        ? `${Math.floor((Date.now() - new Date(a.source_date).getTime()) / 3600000)}h ago`
+        : '';
+
+      const icon = a.source === 'task' ? '📋' :
+                   a.source === 'agent-notification' ? '🔔' :
+                   tags.includes('agent-report') ? '📊' :
+                   tags.includes('draft') ? '✏️' : '•';
+
+      console.log(`  ${icon} [${agentName}] ${a.title} (${age}${status ? ` • ${status}` : ''})`);
+      if (a.summary) console.log(`     ${(a.summary as string).slice(0, 150)}`);
+      console.log('');
+    }
+  });
+
+// ============================================================
+// prime config <key> <value> — set configuration
+// ============================================================
+program
+  .command('config <key> <value>')
+  .description('Set a configuration value (e.g., notify_phone_number "+15551234567")')
+  .action(async (key: string, value: string) => {
+    const db = await getDb();
+    setConfig(db, key, value);
+    console.log(`  ✓ Set ${key}\n`);
+  });
+
 program.parse();
