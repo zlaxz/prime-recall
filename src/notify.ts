@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import { platform } from 'os';
 import type Database from 'better-sqlite3';
 import { v4 as uuid } from 'uuid';
-import { getConfig, insertKnowledge, type KnowledgeItem } from './db.js';
+import { getConfig, setConfig, insertKnowledge, type KnowledgeItem } from './db.js';
 
 // ============================================================
 // Multi-Channel Notification System
