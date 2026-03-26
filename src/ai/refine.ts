@@ -212,7 +212,96 @@ ${context}`,
   }
 
   // ========================================================
-  // 8. Build connections graph
+  // 8. Dream Consolidation (from Anthropic AutoDream pattern)
+  //    - Detect contradictions in semantics
+  //    - Prune superseded facts
+  //    - Archive stale low-importance items
+  //    - Resolve duplicate semantics
+  // ========================================================
+  log('  💤 Dream consolidation...');
+  try {
+    let dreamed = 0;
+
+    // 8a. Find and mark superseded semantics (same topic, different values, different dates)
+    const currentSemantics = db.prepare(
+      'SELECT * FROM semantics WHERE valid_until IS NULL ORDER BY created_at DESC'
+    ).all() as any[];
+
+    for (let i = 0; i < currentSemantics.length; i++) {
+      for (let j = i + 1; j < currentSemantics.length; j++) {
+        const a = currentSemantics[i];
+        const b = currentSemantics[j];
+        // Same project + same fact_type + different fact = potential supersede
+        if (a.project && a.project === b.project && a.fact_type === b.fact_type) {
+          // Simple word overlap check (>50% shared words = same topic)
+          const wordsA = new Set(a.fact.toLowerCase().split(/\s+/));
+          const wordsB = new Set(b.fact.toLowerCase().split(/\s+/));
+          let overlap = 0;
+          for (const w of wordsA) { if (wordsB.has(w)) overlap++; }
+          const overlapRatio = overlap / Math.max(wordsA.size, wordsB.size);
+
+          if (overlapRatio > 0.5 && a.fact !== b.fact) {
+            // Newer one (a, since sorted DESC) supersedes older (b)
+            db.prepare(
+              'UPDATE semantics SET valid_until = datetime(\'now\'), superseded_by = ? WHERE id = ?'
+            ).run(a.id, b.id);
+            dreamed++;
+          }
+        }
+      }
+    }
+
+    // 8b. Archive stale knowledge items (>90 days, low importance, not critical)
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 86400000).toISOString();
+    const archivable = db.prepare(
+      "SELECT id FROM knowledge WHERE source_date < ? AND importance = 'low' AND valid_until IS NULL"
+    ).all(ninetyDaysAgo) as any[];
+
+    for (const row of archivable) {
+      db.prepare(
+        "UPDATE knowledge SET valid_until = datetime('now'), importance = 'archived' WHERE id = ?"
+      ).run(row.id);
+      dreamed++;
+    }
+
+    // 8c. Prune duplicate themes (same name, merge semantic_ids)
+    const allThemes = db.prepare('SELECT * FROM themes ORDER BY size DESC').all() as any[];
+    const themesByName = new Map<string, any[]>();
+    for (const t of allThemes) {
+      const key = (t.name as string).toLowerCase().trim();
+      const existing = themesByName.get(key) || [];
+      existing.push(t);
+      themesByName.set(key, existing);
+    }
+    for (const [_, dupes] of themesByName) {
+      if (dupes.length > 1) {
+        // Keep the largest, merge others into it
+        const keeper = dupes[0]; // already sorted by size DESC
+        const keeperIds = JSON.parse(keeper.semantic_ids || '[]');
+        for (let d = 1; d < dupes.length; d++) {
+          const mergeIds = JSON.parse(dupes[d].semantic_ids || '[]');
+          for (const id of mergeIds) {
+            if (!keeperIds.includes(id)) keeperIds.push(id);
+          }
+          db.prepare('DELETE FROM themes WHERE id = ?').run(dupes[d].id);
+          dreamed++;
+        }
+        db.prepare('UPDATE themes SET semantic_ids = ?, size = ? WHERE id = ?')
+          .run(JSON.stringify(keeperIds), keeperIds.length, keeper.id);
+      }
+    }
+
+    if (dreamed > 0) {
+      log(`  ✓ Dream: ${dreamed} consolidation actions (superseded facts, archived items, merged themes)`);
+    } else {
+      log('  ✓ Dream: knowledge base is clean');
+    }
+  } catch (err: any) {
+    log(`  ⚠ Dream consolidation failed: ${err.message}`);
+  }
+
+  // ========================================================
+  // 9. Build connections graph
   // ========================================================
   log('  🔗 Building connections graph...');
   try {
