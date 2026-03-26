@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { getDb, saveDb, getStats, setConfig, getConfig, searchByText, searchByEmbedding, insertKnowledge, type KnowledgeItem } from './db.js';
 import { generateEmbedding } from './embedding.js';
 import { extractIntelligence } from './ai/extract.js';
+import { ask as askPrime } from './ai/ask.js';
 import { v4 as uuid } from 'uuid';
 import { connectGmail, scanGmail } from './connectors/gmail.js';
 
@@ -253,6 +254,37 @@ program
     console.log(`    📄 Source: ${filePath}`);
     if (extracted.contacts.length) console.log(`    👤 Contacts: ${extracted.contacts.join(', ')}`);
     console.log('');
+  });
+
+// ============================================================
+// prime ask <question>
+// ============================================================
+program
+  .command('ask <question>')
+  .description('Ask Prime anything about your business')
+  .option('-m, --model <model>', 'LLM model to use', 'gpt-4o-mini')
+  .action(async (question: string, opts: any) => {
+    const db = await getDb();
+    console.log('\n  ⚡ Thinking...\n');
+
+    try {
+      const answer = await askPrime(db, question, { model: opts.model });
+      console.log(`  ${answer.replace(/\n/g, '\n  ')}\n`);
+    } catch (err: any) {
+      console.error(`  Error: ${err.message}\n`);
+    }
+  });
+
+// ============================================================
+// prime context <text>
+// ============================================================
+program
+  .command('context <text>')
+  .description('Set your business context — Prime uses this to prioritize everything')
+  .action(async (text: string) => {
+    const db = await getDb();
+    setConfig(db, 'business_context', text);
+    console.log('\n  ✓ Business context saved. Prime will use this to prioritize.\n');
   });
 
 // ============================================================
