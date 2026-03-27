@@ -48,30 +48,113 @@ export interface AlertItem {
 
 export function getAlerts(db: Database.Database): AlertItem[] {
   const alerts: AlertItem[] = [];
-  const allItems = queryRows(db, `SELECT * FROM knowledge ORDER BY source_date DESC`, []);
   const now = new Date();
 
-  // 1. Dropped balls — people waiting on you
-  for (const item of allItems) {
-    const meta = item.metadata || {};
-    const tags = item.tags || [];
-    if ((meta.waiting_on_user || tags.includes('awaiting_reply')) && meta.days_since_last > 7) {
-      const contacts = item.contacts || [];
-      alerts.push({
-        type: 'dropped_ball',
-        severity: meta.days_since_last > 21 ? 'critical' : meta.days_since_last > 14 ? 'high' : 'normal',
-        title: `${contacts.join(', ') || 'Someone'} waiting on your reply`,
-        detail: `"${item.title}" — ${meta.days_since_last} days with no response`,
-        contact: contacts[0],
-        project: item.project,
-        daysSince: meta.days_since_last,
-        source_ref: item.source_ref,
-        conversation_uuid: meta.conversation_uuid || meta.thread_id,
-      });
+  // ── Build entity filters ──────────────────────────────────
+  // Get dismissed entity names + domains
+  const dismissedNames = new Set<string>();
+  const dismissedDomains = new Set<string>();
+  const employeeNames = new Set<string>();
+
+  try {
+    const dismissed = db.prepare('SELECT canonical_name, domain FROM entities WHERE user_dismissed = 1').all() as any[];
+    for (const d of dismissed) {
+      dismissedNames.add(d.canonical_name.toLowerCase());
+      if (d.domain) dismissedDomains.add(d.domain.toLowerCase());
     }
+
+    // Get all aliases for dismissed entities
+    const dismissedAliases = db.prepare(`
+      SELECT ea.alias_normalized FROM entity_aliases ea
+      JOIN entities e ON ea.entity_id = e.id WHERE e.user_dismissed = 1
+    `).all() as any[];
+    for (const a of dismissedAliases) dismissedNames.add(a.alias_normalized);
+
+    // Get dismissed patterns/domains from dismissals table
+    const patterns = db.prepare('SELECT domain FROM dismissals WHERE domain IS NOT NULL').all() as any[];
+    for (const p of patterns) dismissedDomains.add(p.domain.toLowerCase());
+
+    // Get employee names (don't flag their emails as dropped balls)
+    const employees = db.prepare(`
+      SELECT canonical_name FROM entities
+      WHERE (user_label = 'employee' OR relationship_type = 'employee') AND user_dismissed = 0
+    `).all() as any[];
+    for (const e of employees) employeeNames.add(e.canonical_name.toLowerCase());
+
+    const employeeAliases = db.prepare(`
+      SELECT ea.alias_normalized FROM entity_aliases ea
+      JOIN entities e ON ea.entity_id = e.id
+      WHERE (e.user_label = 'employee' OR e.relationship_type = 'employee') AND e.user_dismissed = 0
+    `).all() as any[];
+    for (const a of employeeAliases) employeeNames.add(a.alias_normalized);
+  } catch {
+    // Entity tables might not exist yet
   }
 
-  // 2. Overdue commitments
+  // Helper: check if ALL contacts on an item are filtered out
+  const shouldFilter = (contacts: string[]): boolean => {
+    if (contacts.length === 0) return false;
+    return contacts.every(c => {
+      const lower = c.toLowerCase();
+      const normalized = lower.replace(/[^a-z\s-]/g, '').trim();
+      return dismissedNames.has(lower) || dismissedNames.has(normalized) ||
+             employeeNames.has(lower) || employeeNames.has(normalized);
+    });
+  };
+
+  // ── 1. Dropped balls — people waiting on you ──────────────
+  const awaitingItems = queryRows(db, `
+    SELECT * FROM knowledge
+    WHERE tags LIKE '%awaiting_reply%'
+    ORDER BY source_date ASC
+  `, []);
+
+  for (const item of awaitingItems) {
+    const meta = item.metadata || {};
+    if (meta.user_replied) continue; // already handled via sent mail
+
+    const contacts = item.contacts || [];
+
+    // Filter self
+    const nonSelf = contacts.filter((c: string) => !c.toLowerCase().includes('zach stock'));
+    if (nonSelf.length === 0) continue;
+
+    // Check who sent LAST — if they're an employee or dismissed, skip
+    if (meta.last_from) {
+      const lastFromLower = (meta.last_from as string).toLowerCase();
+      // Check if last sender is an employee
+      const lastSenderIsEmployee = Array.from(employeeNames).some(name => lastFromLower.includes(name));
+      if (lastSenderIsEmployee) continue;
+
+      // Check if last sender is dismissed
+      const lastSenderIsDismissed = Array.from(dismissedNames).some(name => lastFromLower.includes(name));
+      if (lastSenderIsDismissed) continue;
+
+      // Check domain dismissal
+      const emailMatch = lastFromLower.match(/@([^\s>]+)/);
+      if (emailMatch && dismissedDomains.has(emailMatch[1])) continue;
+    }
+
+    // Also check if ALL contacts are filtered (for non-Gmail sources without last_from)
+    if (shouldFilter(nonSelf)) continue;
+
+    const days = item.source_date ? daysBetween(item.source_date) : 0;
+    if (days < 7) continue;
+
+    alerts.push({
+      type: 'dropped_ball',
+      severity: days > 21 ? 'critical' : days > 14 ? 'high' : 'normal',
+      title: `${nonSelf.join(', ')} waiting on your reply`,
+      detail: `"${item.title}" — ${days}d`,
+      contact: nonSelf[0],
+      project: item.project,
+      daysSince: days,
+      source_ref: item.source_ref,
+      conversation_uuid: meta.conversation_uuid || meta.thread_id,
+    });
+  }
+
+  // ── 2. Overdue commitments ────────────────────────────────
   try {
     const commitments = queryRows(db, `SELECT * FROM commitments WHERE state IN ('overdue', 'active')`, []);
     for (const c of commitments) {
@@ -99,42 +182,43 @@ export function getAlerts(db: Database.Database): AlertItem[] {
         }
       }
     }
-  } catch {
-    // commitments table might not exist
-  }
+  } catch {}
 
-  // 3. Cold relationships — important contacts going silent
-  const contactMap = new Map<string, { count: number; lastDate: string }>();
-  for (const item of allItems) {
-    for (const name of (item.contacts || [])) {
-      const existing = contactMap.get(name) || { count: 0, lastDate: '' };
-      existing.count++;
-      if (item.source_date && item.source_date > existing.lastDate) {
-        existing.lastDate = item.source_date;
-      }
-      contactMap.set(name, existing);
-    }
-  }
+  // ── 3. Cold relationships (from entity graph, not raw scan) ──
+  try {
+    const coldEntities = db.prepare(`
+      SELECT e.canonical_name, e.relationship_type, e.user_label,
+        COUNT(em.id) as mentions,
+        MAX(em.mention_date) as last_seen
+      FROM entities e
+      LEFT JOIN entity_mentions em ON e.id = em.entity_id
+      WHERE e.type = 'person' AND e.user_dismissed = 0
+        AND e.canonical_name != 'Zach Stock'
+        AND (e.user_label IS NULL OR e.user_label NOT IN ('employee', 'noise'))
+        AND (e.relationship_type IS NULL OR e.relationship_type NOT IN ('employee', 'noise'))
+      GROUP BY e.id
+      HAVING mentions >= 5
+    `).all() as any[];
 
-  for (const [name, data] of contactMap) {
-    if (data.count >= 3 && data.lastDate) {
-      const days = daysBetween(data.lastDate);
+    for (const e of coldEntities) {
+      if (!e.last_seen) continue;
+      const days = daysBetween(e.last_seen);
       if (days > 14) {
         alerts.push({
           type: 'cold_relationship',
           severity: days > 30 ? 'high' : 'normal',
-          title: `${name} going cold`,
-          detail: `Last interaction ${days}d ago (${data.count} total mentions)`,
-          contact: name,
+          title: `${e.canonical_name} going cold`,
+          detail: `${days}d since last interaction (${e.mentions} mentions, ${e.user_label || e.relationship_type || 'unclassified'})`,
+          contact: e.canonical_name,
           daysSince: days,
         });
       }
     }
-  }
+  } catch {}
 
-  // Sort: critical first, then high, then normal
-  const severityOrder = { critical: 0, high: 1, normal: 2 };
-  alerts.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+  // Sort by severity
+  const severityOrder: Record<string, number> = { critical: 0, high: 1, normal: 2 };
+  alerts.sort((a, b) => (severityOrder[a.severity] ?? 3) - (severityOrder[b.severity] ?? 3));
 
   return alerts;
 }
