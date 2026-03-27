@@ -809,6 +809,64 @@ server.tool(
   }
 );
 
+server.tool(
+  "prime_update_instructions",
+  "Update an AI agent's instructions based on user training. Use when the user gives a general instruction about how an agent should behave — not a specific task, but a RULE to remember. Examples: 'stop showing me employee emails', 'always check Carefront first', 'never mention FGMC unless I ask'. The instruction is permanently added to the agent's prompt.",
+  {
+    agent: z.string().describe("Agent name: cos, carefront-pm, follow-up, deal-monitor, etc."),
+    instruction: z.string().describe("The new instruction/rule to add to the agent's behavior"),
+    category: z.string().optional().describe("Category: filter, priority, format, tone, scope"),
+  },
+  async ({ agent, instruction, category }) => {
+    try {
+      const { existsSync, readFileSync, writeFileSync } = await import('fs');
+      const { join } = await import('path');
+      const { homedir } = await import('os');
+
+      const agentPath = join(homedir(), '.prime', 'agents', `${agent}.json`);
+      if (!existsSync(agentPath)) {
+        return { content: [{ type: "text" as const, text: `Agent "${agent}" not found. Available: cos, carefront-pm, follow-up, deal-monitor, commitment-tracker, innovation-scout, process-analyst, self-improver` }] };
+      }
+
+      const config = JSON.parse(readFileSync(agentPath, 'utf-8'));
+
+      // Add to learned_instructions array
+      if (!config.learned_instructions) config.learned_instructions = [];
+      config.learned_instructions.push({
+        instruction,
+        category: category || 'general',
+        learned_at: new Date().toISOString(),
+      });
+
+      // Append to the actual prompt
+      const instructionBlock = `\n\nUSER TRAINING (${new Date().toLocaleDateString()}):\n- ${instruction}`;
+      config.prompt += instructionBlock;
+
+      // Save
+      writeFileSync(agentPath, JSON.stringify(config, null, 2));
+
+      // Also save to Prime Recall for persistence
+      const db = getDb();
+      const { v4: uuidv4 } = await import('uuid');
+      const { insertKnowledge } = await import('../db.js');
+      insertKnowledge(db, {
+        id: uuidv4(),
+        title: `Training: ${agent} — ${instruction.slice(0, 60)}`,
+        summary: `Agent "${agent}" trained with new instruction: ${instruction}`,
+        source: 'training',
+        source_ref: `training:${agent}:${Date.now()}`,
+        source_date: new Date().toISOString(),
+        tags: ['training', `agent:${agent}`, category || 'general'],
+        importance: 'normal',
+      });
+
+      return { content: [{ type: "text" as const, text: `✓ Updated ${agent}'s instructions:\n"${instruction}"\n\nThis rule is now permanent. ${agent} will follow it on every future run.` }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `✗ Failed to update: ${err.message}` }] };
+    }
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
