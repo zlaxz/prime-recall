@@ -5,8 +5,7 @@ import { v4 as uuid } from 'uuid';
 import type Database from 'better-sqlite3';
 import { insertKnowledge, setConfig, getConfig, type KnowledgeItem } from '../db.js';
 import { generateEmbedding, generateEmbeddings } from '../embedding.js';
-import { extractIntelligence, type ExtractionResult } from '../ai/extract.js';
-import OpenAI from 'openai';
+import { extractIntelligence } from '../ai/extract.js';
 
 // ============================================================
 // Cowork Session Scanner
@@ -299,19 +298,7 @@ export async function scanCowork(
     const batch = sessionTexts.slice(i, i + CONCURRENCY);
     const results = await Promise.all(batch.map(async ({ session, text, taskName }): Promise<ProcessedSession | null> => {
       try {
-        // Force OpenAI for extraction (claude-code provider breaks on long content)
-        const client = new OpenAI({ apiKey });
-        const response = await client.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: 'Analyze this content and extract structured intelligence. Return JSON only.\n\n{"title": "Brief title (max 80 chars)", "summary": "2-3 sentence summary", "contacts": ["names"], "organizations": ["orgs"], "decisions": ["decisions made"], "commitments": ["promises made"], "action_items": ["things to do"], "tags": ["tags"], "project": "project name or null", "importance": "low|normal|high|critical"}' },
-            { role: 'user', content: text.slice(0, 6000) },
-          ],
-          temperature: 0.1,
-          max_tokens: 1000,
-          response_format: { type: 'json_object' },
-        });
-        const extracted = JSON.parse(response.choices[0]?.message?.content || '{}') as ExtractionResult;
+        const extracted = await extractIntelligence(text, apiKey);
         return { session, extracted, taskName, text };
       } catch (err: any) {
         console.error(`\n    ✗ Extraction failed for ${session.sessionName}: ${err.message?.slice(0, 100)}`);

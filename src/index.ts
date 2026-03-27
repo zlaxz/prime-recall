@@ -328,7 +328,7 @@ program
 program
   .command('ask <question>')
   .description('Ask Prime anything about your business')
-  .option('-m, --model <model>', 'LLM model to use', 'gpt-4o-mini')
+  .option('-m, --model <model>', 'LLM model to use', 'claude-code')
   .action(async (question: string, opts: any) => {
     const db = getDb();
     console.log('\n  ⚡ Thinking...\n');
