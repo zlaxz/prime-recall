@@ -5,7 +5,7 @@ import { v4 as uuid } from 'uuid';
 import type Database from 'better-sqlite3';
 import { insertKnowledge, setConfig, getConfig, type KnowledgeItem } from '../db.js';
 import { generateEmbedding } from '../embedding.js';
-import { extractIntelligence } from '../ai/extract.js';
+import { extractIntelligence, extractIntelligenceV2, toV1 } from '../ai/extract.js';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
@@ -220,7 +220,14 @@ export async function scanGmail(
 
   async function processThread(td: typeof threadData[0]) {
     try {
-      const ext = await extractIntelligence(td.content, apiKey);
+      // Use V2 provenance extraction, fall back to V1
+      let extV2;
+      try {
+        extV2 = await extractIntelligenceV2(td.content, apiKey);
+      } catch {
+        extV2 = null;
+      }
+      const ext = extV2 ? toV1(extV2) : await extractIntelligence(td.content, apiKey);
       const embText = `${ext.title}\n${ext.summary}`;
       const embedding = await generateEmbedding(embText, apiKey);
 
@@ -255,6 +262,7 @@ export async function scanGmail(
           last_from: td.lastFrom,
           days_since_last: daysSinceLastMessage,
           waiting_on_user: !lastFromIsUser,
+          ...(extV2 ? { extraction_v2: extV2 } : {}),
         },
       };
 

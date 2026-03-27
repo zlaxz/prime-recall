@@ -5,7 +5,7 @@ import { v4 as uuid } from 'uuid';
 import type Database from 'better-sqlite3';
 import { insertKnowledge, setConfig, getConfig, type KnowledgeItem } from '../db.js';
 import { generateEmbedding, generateEmbeddings } from '../embedding.js';
-import { extractIntelligence } from '../ai/extract.js';
+import { extractIntelligence, extractIntelligenceV2, toV1 } from '../ai/extract.js';
 
 // ============================================================
 // Cowork Session Scanner
