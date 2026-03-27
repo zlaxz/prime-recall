@@ -178,6 +178,33 @@ CRITICAL RULES:
 5. importance: critical = revenue/legal, high = key relationship/deadline, normal = routine, low = FYI.
 6. Empty arrays for categories with no extractions. Do not invent items.`;
 
+// Cache entity registry (reload every 5 minutes)
+let _cachedRegistry: { contacts: string[]; projects: string[] } | null = null;
+let _registryLoadedAt = 0;
+
+async function loadEntityRegistry(): Promise<{ contacts: string[]; projects: string[] }> {
+  if (_cachedRegistry && Date.now() - _registryLoadedAt < 300000) return _cachedRegistry;
+
+  try {
+    const { getDb } = await import('../db.js');
+    const db = getDb();
+
+    const contacts = (db.prepare(
+      "SELECT DISTINCT canonical_name FROM entities WHERE type = 'person' AND user_dismissed = 0 ORDER BY canonical_name"
+    ).all() as any[]).map(r => r.canonical_name);
+
+    const projects = (db.prepare(
+      "SELECT DISTINCT project FROM knowledge WHERE project IS NOT NULL AND project != '' GROUP BY project HAVING COUNT(*) >= 3 ORDER BY COUNT(*) DESC"
+    ).all() as any[]).map(r => r.project);
+
+    _cachedRegistry = { contacts, projects };
+    _registryLoadedAt = Date.now();
+    return _cachedRegistry;
+  } catch {
+    return { contacts: [], projects: [] };
+  }
+}
+
 export async function extractIntelligenceV2(
   content: string,
   apiKey?: string,
@@ -186,18 +213,19 @@ export async function extractIntelligenceV2(
 ): Promise<ExtractionResultV2> {
   const provider = await getProvider(apiKey);
 
+  // Auto-load entity registry if not provided
+  const registry = entityRegistry || await loadEntityRegistry();
+
   const ctx = businessContext || await loadBusinessContext();
   let systemPrompt = EXTRACTION_PROMPT_V2;
   if (ctx) {
     systemPrompt += `\n\nBUSINESS CONTEXT:\n${ctx}`;
   }
-  if (entityRegistry) {
-    if (entityRegistry.contacts.length) {
-      systemPrompt += `\n\nKNOWN CONTACTS (use canonical names when matching):\n${entityRegistry.contacts.join(', ')}`;
-    }
-    if (entityRegistry.projects.length) {
-      systemPrompt += `\n\nKNOWN PROJECTS:\n${entityRegistry.projects.join(', ')}`;
-    }
+  if (registry.contacts.length) {
+    systemPrompt += `\n\nKNOWN CONTACTS (use these canonical names when matching):\n${registry.contacts.slice(0, 50).join(', ')}`;
+  }
+  if (registry.projects.length) {
+    systemPrompt += `\n\nKNOWN PROJECTS (ONLY assign to these projects — if no match, set project to null):\n${registry.projects.join(', ')}`;
   }
 
   const response = await provider.chat(
@@ -212,9 +240,21 @@ export async function extractIntelligenceV2(
     const result = JSON.parse(response) as ExtractionResultV2;
     return validateExtractionV2(result, content);
   } catch {
-    // Fallback: run V1 and wrap
-    const v1 = await extractIntelligence(content, apiKey, undefined, businessContext);
-    return v1ToV2(v1);
+    // V2 parse failed — return minimal result, do NOT fall back to V1 (source of hallucinations)
+    return {
+      schema_version: 2,
+      title: content.slice(0, 80).replace(/\n/g, ' '),
+      summary: content.slice(0, 200).replace(/\n/g, ' '),
+      contacts: [],
+      organizations: [],
+      decisions: [],
+      commitments: [],
+      action_items: [],
+      tags: [],
+      project: null,
+      importance: 'normal',
+      importance_reasoning: 'V2 extraction failed — minimal result',
+    };
   }
 }
 
@@ -245,9 +285,22 @@ function validateExtractionV2(result: ExtractionResultV2, sourceContent: string)
   result.commitments = result.commitments.filter(c => c.confidence >= 0.6);
   result.action_items = result.action_items.filter(a => a.confidence >= 0.6);
 
-  // Validate project evidence
+  // Validate project evidence — must have quotes
   if (result.project && (!result.project.evidence || result.project.evidence.length === 0)) {
     result.project = null;
+  }
+
+  // Validate project name against known projects
+  if (result.project) {
+    const registry = _cachedRegistry;
+    if (registry && registry.projects.length > 0) {
+      const known = registry.projects.map(p => p.toLowerCase());
+      const projectLower = result.project.name.toLowerCase();
+      if (!known.some(k => k.includes(projectLower) || projectLower.includes(k))) {
+        // Project not in known list — reject it
+        result.project = null;
+      }
+    }
   }
 
   result.schema_version = 2;
