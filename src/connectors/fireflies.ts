@@ -45,7 +45,7 @@ async function firefliesQuery(apiKey: string, query: string, variables?: any): P
     throw new Error(`Fireflies API error: ${response.status} ${await response.text()}`);
   }
 
-  const data = await response.json();
+  const data: any = await response.json();
   if (data.errors) {
     throw new Error(`Fireflies GraphQL error: ${data.errors[0]?.message}`);
   }

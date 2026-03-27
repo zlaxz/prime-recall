@@ -489,8 +489,23 @@ program
       } else {
         console.log('  ✗ Failed to connect Cowork\n');
       }
+    } else if (source === 'fireflies') {
+      console.log('\n⚡ Connecting Fireflies.ai...\n');
+      const success = await connectFireflies(db, opts.sessionKey);
+
+      if (success) {
+        console.log('\n  Scanning meetings...\n');
+        const { meetings, items, skipped } = await scanFireflies(db, { days: 90, maxMeetings: 100 });
+        console.log(`\n  ✓ ${meetings} meetings → ${items} knowledge items`);
+        if (skipped > 0) console.log(`    ${skipped} skipped (already indexed)`);
+
+        const stats = getStats(db);
+        console.log(`\n  Total knowledge: ${stats.total_items} items\n`);
+      } else {
+        console.log('  ✗ Failed to connect Fireflies\n');
+      }
     } else {
-      console.log(`  Unknown source: ${source}. Available: gmail, calendar, claude, otter, cowork\n`);
+      console.log(`  Unknown source: ${source}. Available: gmail, calendar, claude, otter, cowork, fireflies\n`);
     }
   });
 
@@ -649,6 +664,17 @@ program
         console.log(`  ✓ Otter: ${meetings} meetings → ${items} items`);
       } catch (err: any) {
         console.log(`  ⚠ Otter sync failed: ${err.message}`);
+      }
+    }
+
+    const firefliesKey = getConfig(db, 'fireflies_api_key');
+    if (firefliesKey) {
+      console.log('  Syncing Fireflies.ai...');
+      try {
+        const { meetings, items } = await scanFireflies(db, { days: 7, maxMeetings: 20 });
+        console.log(`  ✓ Fireflies: ${meetings} meetings → ${items} items`);
+      } catch (err: any) {
+        console.log(`  ⚠ Fireflies sync failed: ${err.message}`);
       }
     }
 
