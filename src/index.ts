@@ -2540,4 +2540,51 @@ program
     console.log('');
   });
 
+// ============================================================
+// recall pipeline — revenue pipeline analysis
+// ============================================================
+program
+  .command('pipeline')
+  .description('Revenue pipeline analysis — deal stages, time allocation, bottlenecks, recommendations')
+  .action(async () => {
+    const db = getDb();
+    const { analyzePipeline } = await import('./ai/pipeline.js');
+    const analysis = analyzePipeline(db);
+
+    console.log('\n⚡ REVENUE PIPELINE\n');
+
+    // Deals
+    console.log('  DEALS:\n');
+    const trendIcons: Record<string, string> = { accelerating: '🚀', steady: '➡️', decelerating: '📉', stalled: '⛔' };
+    for (const d of analysis.deals.slice(0, 10)) {
+      const trend = trendIcons[d.activity_trend] || '?';
+      const overdue = d.commitments_overdue > 0 ? ` ⚠ ${d.commitments_overdue} overdue` : '';
+      console.log(`  ${trend} ${d.project} — ${d.item_count} items, ${d.days_since}d ago, ${d.people_count} people${overdue}`);
+      if (d.key_people.length) console.log(`     People: ${d.key_people.join(', ')}`);
+    }
+
+    // Time allocation
+    console.log('\n  TIME ALLOCATION (last 14 days):\n');
+    for (const t of analysis.time_allocation.slice(0, 8)) {
+      const bar = '█'.repeat(Math.round(t.pct / 5)) + '░'.repeat(20 - Math.round(t.pct / 5));
+      console.log(`  ${bar}  ${t.pct}%  ${t.project}`);
+    }
+
+    // Bottlenecks
+    if (analysis.bottlenecks.length > 0) {
+      console.log('\n  BOTTLENECKS:\n');
+      for (const b of analysis.bottlenecks) console.log(`  ⚠ ${b}`);
+    }
+
+    // Recommendations
+    if (analysis.recommendations.length > 0) {
+      console.log('\n  RECOMMENDATIONS:\n');
+      for (let i = 0; i < analysis.recommendations.length; i++) {
+        console.log(`  ${i + 1}. ${analysis.recommendations[i]}`);
+      }
+    }
+
+    console.log('');
+  });
+
 program.parse();

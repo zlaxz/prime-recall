@@ -503,6 +503,119 @@ export function getSignals(db: Database.Database, entityName: string): any[] {
   return db.prepare('SELECT signal_type, count, last_seen FROM entity_signals WHERE entity_id = ?').all(entity.id) as any[];
 }
 
+// ── Communication Pattern Analysis ───────────────────────────
+
+export interface CommunicationPattern {
+  entity_name: string;
+  total_interactions: number;
+  inbound: number;
+  outbound: number;
+  avg_gap_days: number;        // average days between interactions
+  last_interaction: string;
+  days_since: number;
+  interaction_frequency: 'daily' | 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'rare';
+  trend: 'increasing' | 'stable' | 'decreasing' | 'stalled';
+  sources: string[];
+  projects: string[];
+  peak_day?: string;           // day of week with most interactions
+}
+
+export function analyzeEntityPattern(db: Database.Database, nameOrEmail: string): CommunicationPattern | null {
+  const entity = getEntity(db, nameOrEmail);
+  if (!entity) return null;
+
+  // Get all mentions with dates
+  const mentions = db.prepare(`
+    SELECT em.direction, em.mention_date, k.source, k.project
+    FROM entity_mentions em
+    JOIN knowledge k ON em.knowledge_item_id = k.id
+    WHERE em.entity_id = ? AND em.mention_date IS NOT NULL
+    ORDER BY em.mention_date ASC
+  `).all(entity.id) as any[];
+
+  if (mentions.length < 2) return null;
+
+  const inbound = mentions.filter((m: any) => m.direction === 'inbound').length;
+  const outbound = mentions.filter((m: any) => m.direction === 'outbound').length;
+  const sources = [...new Set(mentions.map((m: any) => m.source))];
+  const projects = [...new Set(mentions.filter((m: any) => m.project).map((m: any) => m.project))];
+
+  // Calculate average gap between interactions
+  const dates = mentions.map((m: any) => new Date(m.mention_date).getTime()).sort();
+  const gaps: number[] = [];
+  for (let i = 1; i < dates.length; i++) {
+    gaps.push((dates[i] - dates[i - 1]) / 86400000);
+  }
+  const avgGap = gaps.length > 0 ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 0;
+
+  // Frequency classification
+  let frequency: CommunicationPattern['interaction_frequency'];
+  if (avgGap <= 1.5) frequency = 'daily';
+  else if (avgGap <= 7) frequency = 'weekly';
+  else if (avgGap <= 14) frequency = 'biweekly';
+  else if (avgGap <= 30) frequency = 'monthly';
+  else if (avgGap <= 90) frequency = 'quarterly';
+  else frequency = 'rare';
+
+  // Trend: compare recent 14d activity to previous 14d
+  const now = Date.now();
+  const recent = mentions.filter((m: any) => now - new Date(m.mention_date).getTime() < 14 * 86400000).length;
+  const previous = mentions.filter((m: any) => {
+    const t = now - new Date(m.mention_date).getTime();
+    return t >= 14 * 86400000 && t < 28 * 86400000;
+  }).length;
+
+  let trend: CommunicationPattern['trend'];
+  if (recent === 0) trend = 'stalled';
+  else if (recent > previous * 1.5) trend = 'increasing';
+  else if (recent < previous * 0.5) trend = 'decreasing';
+  else trend = 'stable';
+
+  // Peak day of week
+  const dayCount: Record<string, number> = {};
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  for (const m of mentions) {
+    const day = dayNames[new Date(m.mention_date).getDay()];
+    dayCount[day] = (dayCount[day] || 0) + 1;
+  }
+  const peakDay = Object.entries(dayCount).sort((a, b) => b[1] - a[1])[0]?.[0];
+
+  const lastMention = mentions[mentions.length - 1];
+  const daysSince = Math.floor((now - new Date(lastMention.mention_date).getTime()) / 86400000);
+
+  return {
+    entity_name: entity.canonical_name,
+    total_interactions: mentions.length,
+    inbound,
+    outbound,
+    avg_gap_days: Math.round(avgGap * 10) / 10,
+    last_interaction: lastMention.mention_date,
+    days_since: daysSince,
+    interaction_frequency: frequency,
+    trend,
+    sources,
+    projects,
+    peak_day: peakDay,
+  };
+}
+
+/**
+ * Get communication patterns for all active, non-dismissed entities.
+ */
+export function getTopPatterns(db: Database.Database, limit: number = 20): CommunicationPattern[] {
+  const entities = db.prepare(`
+    SELECT e.canonical_name FROM entities e
+    LEFT JOIN entity_mentions em ON e.id = em.entity_id
+    WHERE e.type = 'person' AND e.user_dismissed = 0 AND e.canonical_name != 'Zach Stock'
+    GROUP BY e.id HAVING COUNT(em.id) >= 5
+    ORDER BY COUNT(em.id) DESC LIMIT ?
+  `).all(limit) as any[];
+
+  return entities
+    .map((e: any) => analyzeEntityPattern(db, e.canonical_name))
+    .filter(Boolean) as CommunicationPattern[];
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 
 function parseJsonArray(val: any): string[] {

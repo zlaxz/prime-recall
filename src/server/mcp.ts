@@ -719,6 +719,96 @@ server.tool(
   }
 );
 
+server.tool(
+  "prime_send_email",
+  "Send an email on behalf of the user via Gmail. Use when the user approves sending a follow-up, reply, or new email. Always confirm with the user before sending. The email is logged in Prime Recall automatically.",
+  {
+    to: z.string().describe("Recipient email address"),
+    subject: z.string().describe("Email subject line"),
+    body: z.string().describe("Email body text"),
+    cc: z.string().optional().describe("CC recipients (comma-separated)"),
+    reply_to_thread: z.string().optional().describe("Thread ID to reply to (from knowledge item metadata)"),
+  },
+  async ({ to, subject, body, cc, reply_to_thread }) => {
+    const db = getDb();
+    const { sendEmail } = await import('../connectors/gmail.js');
+    const result = await sendEmail(db, {
+      to, subject, body, cc,
+      replyToThreadId: reply_to_thread,
+    });
+
+    if (result.success) {
+      return { content: [{ type: "text" as const, text: `✓ Email sent to ${to}\nSubject: ${subject}\nThread: ${result.threadId || 'new'}` }] };
+    } else {
+      return { content: [{ type: "text" as const, text: `✗ Failed to send: ${result.error}` }] };
+    }
+  }
+);
+
+server.tool(
+  "prime_schedule_meeting",
+  "Schedule a meeting on the user's Google Calendar. Use when the user approves scheduling a call or meeting. Always confirm details before creating.",
+  {
+    title: z.string().describe("Meeting title"),
+    start_time: z.string().describe("Start time in ISO format (e.g., 2026-03-28T14:00:00-06:00)"),
+    duration_minutes: z.number().optional().default(30).describe("Duration in minutes"),
+    attendees: z.array(z.string()).optional().describe("Attendee email addresses"),
+    description: z.string().optional().describe("Meeting description/agenda"),
+    location: z.string().optional().describe("Location or video call link"),
+  },
+  async ({ title, start_time, duration_minutes, attendees, description, location }) => {
+    const db = getDb();
+    const tokens = getConfig(db, 'gmail_tokens'); // shared with calendar
+    if (!tokens) return { content: [{ type: "text" as const, text: "Calendar not connected" }] };
+
+    try {
+      const { google } = await import('googleapis');
+      const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID || '',
+        process.env.GOOGLE_CLIENT_SECRET || '',
+        'http://localhost:9876/callback'
+      );
+      oauth2Client.setCredentials(tokens);
+
+      const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+      const startDate = new Date(start_time);
+      const endDate = new Date(startDate.getTime() + (duration_minutes || 30) * 60000);
+
+      const event = await calendar.events.insert({
+        calendarId: 'primary',
+        requestBody: {
+          summary: title,
+          description: description || '',
+          location: location || '',
+          start: { dateTime: startDate.toISOString() },
+          end: { dateTime: endDate.toISOString() },
+          attendees: attendees?.map(email => ({ email })),
+        },
+      });
+
+      // Log to Prime Recall
+      const { v4: uuidv4 } = await import('uuid');
+      const { insertKnowledge } = await import('../db.js');
+      insertKnowledge(db, {
+        id: uuidv4(),
+        title: `Scheduled: ${title}`,
+        summary: `Meeting scheduled for ${startDate.toLocaleString()} with ${attendees?.join(', ') || 'no attendees'}`,
+        source: 'calendar',
+        source_ref: `event:${event.data.id}`,
+        source_date: startDate.toISOString(),
+        contacts: attendees || [],
+        tags: ['scheduled', 'agent-action'],
+        importance: 'normal',
+      });
+
+      return { content: [{ type: "text" as const, text: `✓ Meeting scheduled: ${title}\nWhen: ${startDate.toLocaleString()}\nDuration: ${duration_minutes} min\nAttendees: ${attendees?.join(', ') || 'none'}\nLink: ${event.data.htmlLink || ''}` }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `✗ Failed to schedule: ${err.message}` }] };
+    }
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

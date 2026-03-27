@@ -9,6 +9,7 @@ import { extractIntelligence, extractIntelligenceV2, toV1 } from '../ai/extract.
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/calendar.readonly',
 ];
 
@@ -434,4 +435,108 @@ export async function scanSentMail(
   ).run(stats.corrected);
 
   return stats;
+}
+
+// ============================================================
+// Send Email — Execution Engine Phase A1
+// ============================================================
+
+export async function sendEmail(
+  db: Database.Database,
+  options: {
+    to: string;
+    subject: string;
+    body: string;
+    cc?: string;
+    bcc?: string;
+    replyToThreadId?: string;  // reply to existing thread
+    html?: boolean;
+  }
+): Promise<{ success: boolean; messageId?: string; threadId?: string; error?: string }> {
+  const tokens = getConfig(db, 'gmail_tokens');
+  if (!tokens) return { success: false, error: 'Gmail not connected' };
+
+  const clientId = CLIENT_ID || getConfig(db, 'google_client_id') || '';
+  const clientSecret = CLIENT_SECRET || getConfig(db, 'google_client_secret') || '';
+  if (!clientId || !clientSecret) return { success: false, error: 'Google OAuth credentials missing' };
+
+  // Check if we have send scope
+  const scope = tokens.scope || '';
+  if (!scope.includes('gmail.send')) {
+    return { success: false, error: 'Gmail send scope not authorized. Run: recall connect gmail (approve send permission)' };
+  }
+
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI);
+  oauth2Client.setCredentials(tokens);
+
+  // Refresh token
+  oauth2Client.on('tokens', (newTokens) => {
+    const current = getConfig(db, 'gmail_tokens');
+    setConfig(db, 'gmail_tokens', { ...current, ...newTokens });
+  });
+  try {
+    const { credentials } = await oauth2Client.refreshAccessToken();
+    oauth2Client.setCredentials(credentials);
+    setConfig(db, 'gmail_tokens', credentials);
+  } catch (err: any) {
+    return { success: false, error: `Token refresh failed: ${err.message}` };
+  }
+
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+  const userEmail = getConfig(db, 'gmail_email') || '';
+
+  // Build RFC 2822 message
+  const contentType = options.html ? 'text/html' : 'text/plain';
+  const messageParts = [
+    `From: ${userEmail}`,
+    `To: ${options.to}`,
+    options.cc ? `Cc: ${options.cc}` : '',
+    options.bcc ? `Bcc: ${options.bcc}` : '',
+    `Subject: ${options.subject}`,
+    'MIME-Version: 1.0',
+    `Content-Type: ${contentType}; charset=utf-8`,
+    '',
+    options.body,
+  ].filter(Boolean).join('\r\n');
+
+  const encodedMessage = Buffer.from(messageParts).toString('base64url');
+
+  try {
+    const result = await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: {
+        raw: encodedMessage,
+        threadId: options.replyToThreadId || undefined,
+      },
+    });
+
+    // Log the sent email as a knowledge item
+    const { v4: uuidv4 } = await import('uuid');
+    insertKnowledge(db, {
+      id: uuidv4(),
+      title: `Sent: ${options.subject}`,
+      summary: `Email sent to ${options.to}. ${options.body.slice(0, 200)}`,
+      source: 'gmail-sent',
+      source_ref: `sent:${result.data.id}`,
+      source_date: new Date().toISOString(),
+      contacts: [options.to.split('<').pop()?.replace('>', '').trim() || options.to],
+      tags: ['sent', 'agent-action'],
+      importance: 'normal',
+      metadata: {
+        message_id: result.data.id,
+        thread_id: result.data.threadId,
+        to: options.to,
+        subject: options.subject,
+        sent_by: 'prime-recall-agent',
+      },
+    });
+
+    return {
+      success: true,
+      messageId: result.data.id || undefined,
+      threadId: result.data.threadId || undefined,
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
 }
