@@ -536,8 +536,25 @@ export async function runAgent(
     worldContext = getWorldModelForPrompt(getDbForWorld());
   } catch {}
 
+  // Inject domain knowledge files
+  let knowledgeContext = '';
+  try {
+    const { existsSync, readdirSync, readFileSync } = await import('fs');
+    const { join: joinPath } = await import('path');
+    const { homedir: homeDir } = await import('os');
+    const knowledgeDir = joinPath(homeDir(), '.prime', 'agents', 'knowledge', name);
+    if (existsSync(knowledgeDir)) {
+      const files = readdirSync(knowledgeDir).filter(f => f.endsWith('.md'));
+      if (files.length > 0) {
+        const docs = files.map(f => readFileSync(joinPath(knowledgeDir, f), 'utf-8')).join('\n\n---\n\n');
+        knowledgeContext = `<domain-knowledge>\n${docs}\n</domain-knowledge>\n`;
+      }
+    }
+  } catch {}
+
   const prompt = [
     worldContext ? `<world-model>\n${worldContext}\n</world-model>\n` : '',
+    knowledgeContext,
     agent.prompt,
     options.task ? `\n\nSPECIAL TASK FOR THIS RUN:\n${options.task}` : '',
   ].filter(Boolean).join('\n');

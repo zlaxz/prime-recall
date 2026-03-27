@@ -867,6 +867,65 @@ server.tool(
   }
 );
 
+server.tool(
+  "prime_train_knowledge",
+  "Give an agent domain expertise by feeding it a knowledge document. The content becomes part of the agent's permanent knowledge base, injected on every run. Use for: industry guides, playbooks, business rules, relationship context, strategic frameworks.",
+  {
+    agent: z.string().describe("Agent name: cos, carefront-pm, follow-up, etc."),
+    title: z.string().describe("Title for this knowledge (e.g., 'Lloyd's Market Guide', 'Carefront Pricing Strategy')"),
+    content: z.string().describe("The knowledge content — can be a full document, guide, or reference"),
+    category: z.string().optional().describe("Category: industry, strategy, process, relationships, technical"),
+  },
+  async ({ agent, title, content, category }) => {
+    try {
+      const { existsSync, readFileSync, writeFileSync, mkdirSync } = await import('fs');
+      const { join } = await import('path');
+      const { homedir } = await import('os');
+      const { v4: uuidv4 } = await import('uuid');
+
+      // Save knowledge to agent's knowledge directory
+      const knowledgeDir = join(homedir(), '.prime', 'agents', 'knowledge', agent);
+      if (!existsSync(knowledgeDir)) mkdirSync(knowledgeDir, { recursive: true });
+
+      const fileName = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50) + '.md';
+      const filePath = join(knowledgeDir, fileName);
+
+      const header = `# ${title}\nCategory: ${category || 'general'}\nAdded: ${new Date().toISOString()}\n\n`;
+      writeFileSync(filePath, header + content);
+
+      // Update agent config to reference knowledge files
+      const agentPath = join(homedir(), '.prime', 'agents', `${agent}.json`);
+      if (existsSync(agentPath)) {
+        const config = JSON.parse(readFileSync(agentPath, 'utf-8'));
+        if (!config.knowledge_files) config.knowledge_files = [];
+        if (!config.knowledge_files.includes(fileName)) {
+          config.knowledge_files.push(fileName);
+        }
+        writeFileSync(agentPath, JSON.stringify(config, null, 2));
+      }
+
+      // Also save to Prime Recall
+      const db = getDb();
+      const { insertKnowledge } = await import('../db.js');
+      insertKnowledge(db, {
+        id: uuidv4(),
+        title: `Domain Knowledge: ${title} (${agent})`,
+        summary: content.slice(0, 500),
+        source: 'training',
+        source_ref: `knowledge:${agent}:${fileName}`,
+        source_date: new Date().toISOString(),
+        tags: ['domain-knowledge', `agent:${agent}`, category || 'general'],
+        importance: 'normal',
+        metadata: { agent, title, category, file: fileName, content_length: content.length },
+      });
+
+      return { content: [{ type: "text" as const, text: `✓ Knowledge added to ${agent}:\n"${title}" (${content.length} chars, ${category || 'general'})\n\nThis knowledge is now permanent. ${agent} will have access to it on every run.` }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `✗ Failed: ${err.message}` }] };
+    }
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
