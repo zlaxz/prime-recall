@@ -185,8 +185,8 @@ export async function runCOS(db: Database.Database): Promise<COSResult> {
     promptParts.push('');
   }
 
-  promptParts.push(
   const lessonsText = getCorrectionRules(db) || "";
+  promptParts.push(
     correctionText, '',
     lessonsText ? '## ACTIVE LESSONS (from past cycles)\n' + lessonsText : '', '',
     calendarText, '',
