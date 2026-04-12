@@ -1,7 +1,5 @@
 import Foundation
 
-// Ignore SIGPIPE — prevents crash when HTTP clients disconnect mid-stream
-signal(SIGPIPE, SIG_IGN)
 import Cocoa
 
 // ============================================================
@@ -21,6 +19,8 @@ class ProxyDelegate: NSObject, NSApplicationDelegate {
     var server: HTTPServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Ignore SIGPIPE globally — prevents crash when HTTP clients disconnect
+        signal(SIGPIPE, SIG_IGN)
         server = HTTPServer(port: 3211)
         server?.start()
         print("[claude-proxy] Listening on http://localhost:3211")
