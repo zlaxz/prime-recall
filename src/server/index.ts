@@ -47,7 +47,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     if (req.path === '/api/health' || req.path === '/api/status' || req.path.startsWith('/mcp')) return next();
     // Skip auth for localhost
     const ip = req.ip || req.socket.remoteAddress || '';
-    if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1' || ip.includes('192.168.')) return next();
+    if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
     // Skip auth for trusted web app origins (CORS already restricts to known origins)
     const origin = req.headers.origin || '';
     if (origin.endsWith('.lovable.app') || ALLOWED_ORIGINS.includes(origin)) return next();
@@ -749,8 +749,11 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
       try {
         const userLower = message.toLowerCase();
         const isDecision = /\b(decided|done|handled|completed|paused|stopped|cancelled|postponed|approved|rejected|signed|confirmed|changed|updated|moved|dropped)\b/.test(userLower);
-        const isCorrection = /\b(wrong|incorrect|not right|actually|no that's|stop showing|already|don't|doesn't|isn't)\b/.test(userLower);
-        if (isDecision || isCorrection) {
+        const isCorrection = /\b(wrong|incorrect|not right|actually|no that's|stop showing|already|don't|doesn't|isn't|not going|not traveling|cancel|dismiss|ignore|skip)\b/.test(userLower);
+        // Store ALL substantive CEO messages — not just keyword matches
+        // Anything over 15 chars that isn't a system prefix is worth keeping
+        const isSubstantive = message.trim().length > 15 && !message.startsWith('[');
+        if (isDecision || isCorrection || isSubstantive) {
           const { v4: uuidv4 } = await import('uuid');
           const { insertKnowledge } = await import('../db.js');
           insertKnowledge(db, {
@@ -760,9 +763,10 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
             source: 'user-feedback',
             source_ref: `prime:${session_id || 'new'}:${Date.now()}`,
             source_date: new Date().toISOString(),
-            tags: isCorrection ? ['user-correction', 'feedback'] : ['user-decision', 'feedback'],
-            importance: 'high',
-            metadata: { session_id, type: isCorrection ? 'correction' : 'decision' },
+            tags: isCorrection ? ['user-correction', 'feedback'] : isDecision ? ['user-decision', 'feedback'] : ['ceo-input', 'feedback'],
+            importance: isCorrection ? 'critical' : 'high',
+            provenance: 'primary',
+            metadata: { session_id, type: isCorrection ? 'correction' : isDecision ? 'decision' : 'ceo-statement' },
           });
           if (isCorrection) {
             db.prepare(`INSERT OR IGNORE INTO strategic_lessons (id, lesson_date, lesson_type, lesson, domain, severity, correction_rule) VALUES (?, date('now'), 'user_correction', ?, 'general', 'high', ?)`)
