@@ -19,8 +19,10 @@ if [ "$SOURCE_HASH" != "$BUILT_HASH" ] || [ ! -f "$BINARY" ]; then
   echo "Compiling claude-proxy (source changed)..."
   swiftc "$DIR/main.swift" -o "$BINARY" -framework Cocoa -O
   codesign --force --sign - "$BINARY" 2>/dev/null
+  xattr -d com.apple.quarantine "$BINARY" 2>/dev/null
+  xattr -d com.apple.quarantine "$BINARY" 2>/dev/null
   echo "$SOURCE_HASH" > "$APP_DIR/.source_hash"
-  echo "⚠️  Binary rebuilt — you may need to approve Keychain access on Mac Mini screen"
+  echo "Binary rebuilt, signed, quarantine removed"
 else
   echo "claude-proxy binary unchanged — skipping recompile (preserves Keychain trust)"
 fi
