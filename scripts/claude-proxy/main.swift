@@ -1,4 +1,7 @@
 import Foundation
+
+// Ignore SIGPIPE — prevents crash when HTTP clients disconnect mid-stream
+signal(SIGPIPE, SIG_IGN)
 import Cocoa
 
 // ============================================================
