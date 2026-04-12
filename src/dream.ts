@@ -713,7 +713,7 @@ Open commitments: ${commitments.map((c: any) => `${c.text} [${c.state}]${c.due_d
     } catch (_e) {}
 
     // Load correction rules so actions respect past lessons
-    const correctionRulesForActions = getCorrectionRules(db) || ;
+    const correctionRulesForActions = getCorrectionRules(db) || '';
 
     // Use Claude for drafts — DeepSeek produces generic corporate-speak
     const actionPrompt = `You are drafting REAL business communications for Zach Stock, founder of Recapture Insurance (an MGA specializing in senior living/healthcare insurance). Today is ${today}.${standingDecisions}

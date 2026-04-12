@@ -186,8 +186,7 @@ export async function runCOS(db: Database.Database): Promise<COSResult> {
 
   promptParts.push(
     correctionText, '',
-    lessonsText ? '## ACTIVE LESSONS (from past cycles)
-' + lessonsText : '', '',
+    lessonsText ? '## ACTIVE LESSONS (from past cycles)\n' + lessonsText : '', '',
     calendarText, '',
     concernsText, '',
     freshText, '',

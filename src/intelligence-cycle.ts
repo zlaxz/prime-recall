@@ -422,7 +422,7 @@ function detectAnomalies(db: Database.Database): string {
 
 // ── Phase 3: One Deep Claude Call ────────────────────────────
 
-const correctionRulesForIntel = getCorrectionRules(db) || ;
+const correctionRulesForIntel = getCorrectionRules(db) || '';
 
   const INTELLIGENCE_PROMPT = `You are a strategic intelligence analyst with COMPLETE visibility into all of Zach Stock's business operations. You have been given every signal the system has collected — project status, entity profiles, commitments, narrative threads, cross-project patterns, investigation results, communication anomalies, and contradictions.
 
