@@ -862,7 +862,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
         source_date: new Date().toISOString(),
         tags: ['user-feedback', `feedback-${vote}`, `feedback-${type}`],
         project: project || undefined,
-        importance: vote === 'rejected' ? 'high' : 'normal',
+        importance: vote === 'rejected' ? 'critical' : 'high',
+        provenance: 'primary',
         metadata: { type, vote, content, reason },
       });
 
