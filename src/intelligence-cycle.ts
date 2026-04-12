@@ -422,9 +422,8 @@ function detectAnomalies(db: Database.Database): string {
 
 // ── Phase 3: One Deep Claude Call ────────────────────────────
 
-const correctionRulesForIntel = getCorrectionRules(db) || '';
 
-  const INTELLIGENCE_PROMPT = `You are a strategic intelligence analyst with COMPLETE visibility into all of Zach Stock's business operations. You have been given every signal the system has collected — project status, entity profiles, commitments, narrative threads, cross-project patterns, investigation results, communication anomalies, and contradictions.
+function getIntelligencePrompt(db: any) { const rules = getCorrectionRules(db) || "(none)"; return `You are a strategic intelligence analyst with COMPLETE visibility into all of Zach Stock's business operations. You have been given every signal the system has collected — project status, entity profiles, commitments, narrative threads, cross-project patterns, investigation results, communication anomalies, and contradictions.
 
 Your job is not to summarize. Your job is to REASON. Find what the data implies that it doesn't state. Generate knowledge that doesn't exist in any individual item.
 
@@ -503,7 +502,7 @@ GROUND RULES (read these FIRST):
 - Fewer, better outputs. 2 solid hypotheses > 5 speculative ones. 2 clear actions > 5 dramatic ones.
 
 ACTIVE LESSONS FROM PAST CYCLES (respect these — they override defaults):
-${getCorrectionRules(db) || }
+${rules}
 - Use CALM language. "Worth checking:" not "CRITICAL RISK." "Consider:" not "Act NOW."
 - Never lecture Zach's own contacts about things they obviously know (e.g., don't tell a Lloyd's broker about Lloyd's rules).
 
@@ -512,7 +511,7 @@ WHAT TO PRODUCE:
 - "The one thing" must be genuinely the highest-leverage action, not the scariest scenario.
 - 2-3 ACTIONS max. Each concrete with a person and deadline. For emails, draft in Zach's voice — direct, peer-to-peer, never lecturing.
 - 0-2 research questions ONLY if genuinely useful. Do NOT generate research questions just to fill the field.
-- You MUST produce at least 2 hypotheses and 1 weak signal per cycle. These are the primary intelligence outputs. Contradictions and theories of mind can be empty if nothing genuine exists.`;
+- You MUST produce at least 2 hypotheses and 1 weak signal per cycle. These are the primary intelligence outputs. Contradictions and theories of mind can be empty if nothing genuine exists.`; }
 
 // ── Main Entry Point ────────────────────────────────────────
 
