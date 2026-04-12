@@ -194,8 +194,12 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
         tags: extracted.tags,
         project: project || extracted.project,
         importance: extracted.importance,
+        provenance: 'primary',
         embedding,
       };
+
+      // User explicitly remembered this — importance floor is 'high'
+      if (item.importance === 'normal' || item.importance === 'low') item.importance = 'high';
 
       insertKnowledge(db, item);
       res.json({ id: item.id, title: item.title });
@@ -752,7 +756,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
         const isCorrection = /\b(wrong|incorrect|not right|actually|no that's|stop showing|already|don't|doesn't|isn't|not going|not traveling|cancel|dismiss|ignore|skip)\b/.test(userLower);
         // Store ALL substantive CEO messages — not just keyword matches
         // Anything over 15 chars that isn't a system prefix is worth keeping
-        const isSubstantive = message.trim().length > 15 && !message.startsWith('[');
+        const isSubstantive = message.trim().length > 3 && !message.startsWith('[');
         if (isDecision || isCorrection || isSubstantive) {
           const { v4: uuidv4 } = await import('uuid');
           const { insertKnowledge } = await import('../db.js');
@@ -796,6 +800,27 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
         cosReq.write(body);
         cosReq.end();
       });
+
+      // Store Quinn's response in KB for agent access
+      try {
+        const responseContent = result?.content || '';
+        if (responseContent.length > 3) {
+          const { v4: uuidv4_resp } = await import('uuid');
+          const { insertKnowledge: insertKnowledgeResp } = await import('../db.js');
+          insertKnowledgeResp(db, {
+            id: uuidv4_resp(),
+            title: `Quinn response: ${responseContent.slice(0, 80)}`,
+            summary: responseContent.slice(0, 2000),
+            source: 'quinn-response',
+            source_ref: `prime:response:${session_id || 'new'}:${Date.now()}`,
+            source_date: new Date().toISOString(),
+            tags: ['quinn-response'],
+            importance: 'normal',
+            provenance: 'derived',
+            metadata: { session_id },
+          });
+        }
+      } catch { /* non-critical */ }
 
       res.json(result);
     } catch (err: any) {

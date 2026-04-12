@@ -34,7 +34,7 @@ export interface AgentResult {
 
 const DEFAULT_OPTIONS: Required<AgentOptions> = {
   model: 'deepseek-reasoner',
-  maxTurns: 200,
+  maxTurns: 100,
   maxTokens: 16000,
   temperature: 0.5,
   toolResultLimit: 12000,
@@ -131,7 +131,7 @@ async function executeTool(db: Database.Database, name: string, args: any): Prom
           SELECT k.title, substr(k.summary, 1, 300) as summary, k.source, k.source_date, k.source_ref, k.source_account
           FROM knowledge_fts fts
           JOIN knowledge k ON k.rowid = fts.rowid
-          WHERE k.source NOT IN ('agent-report', 'agent-notification', 'briefing', 'playbook', 'cos-insight', 'verification')
+          WHERE k.source NOT IN ('agent-report', 'agent-notification', 'briefing', 'playbook', 'cos-insight', 'verification', 'quinn-response')
           ${args.project ? "AND k.project = '" + args.project.replace(/'/g, "''") + "'" : ''}
           AND knowledge_fts MATCH ?
           ORDER BY fts.rank LIMIT ?
@@ -498,6 +498,6 @@ export async function compileEntityWiki(
   parts.push('');
   parts.push('REMINDER: After the wiki page, you MUST include ---AGENT_MEMORY--- followed by your research notes. Do not end without it.');
 
-  const agent = new DeepSeekAgent(db, { maxTurns: 200, ...options });
+  const agent = new DeepSeekAgent(db, { maxTurns: 50, ...options });
   return agent.run(parts.join('\n'));
 }

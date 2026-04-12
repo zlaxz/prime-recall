@@ -910,6 +910,7 @@ export interface KnowledgeItem {
   artifact_path?: string;
   metadata?: Record<string, any>;
   source_account?: string;
+  provenance?: string;
 }
 
 export function insertKnowledge(db: Database.Database, item: KnowledgeItem) {
@@ -925,8 +926,8 @@ export function insertKnowledge(db: Database.Database, item: KnowledgeItem) {
     `INSERT OR REPLACE INTO knowledge
     (id, title, summary, source, source_ref, source_date, contacts, organizations,
      decisions, commitments, action_items, tags, project, importance, embedding,
-     artifact_path, metadata, source_account, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+     artifact_path, metadata, source_account, provenance, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
   ).run(
     id,
     item.title,
@@ -946,6 +947,7 @@ export function insertKnowledge(db: Database.Database, item: KnowledgeItem) {
     item.artifact_path || null,
     JSON.stringify(item.metadata || {}),
     item.source_account || null,
+    item.provenance || 'primary',
   );
 }
 
