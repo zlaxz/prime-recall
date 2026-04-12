@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { request as httpRequest } from 'http';
+import { getCorrectionRules } from './intelligence-loop.js';
 import { v4 as uuid } from 'uuid';
 
 // ============================================================

@@ -503,7 +503,7 @@ GROUND RULES (read these FIRST):
 - Fewer, better outputs. 2 solid hypotheses > 5 speculative ones. 2 clear actions > 5 dramatic ones.
 
 ACTIVE LESSONS FROM PAST CYCLES (respect these — they override defaults):
-${correctionRulesForIntel}
+${getCorrectionRules(db) || }
 - Use CALM language. "Worth checking:" not "CRITICAL RISK." "Consider:" not "Act NOW."
 - Never lecture Zach's own contacts about things they obviously know (e.g., don't tell a Lloyd's broker about Lloyd's rules).
 
