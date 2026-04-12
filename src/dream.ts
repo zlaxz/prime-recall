@@ -712,9 +712,6 @@ Open commitments: ${commitments.map((c: any) => `${c.text} [${c.state}]${c.due_d
       }
     } catch (_e) {}
 
-    // Load correction rules so actions respect past lessons
-    const correctionRulesForActions = getCorrectionRules(db) || '';
-
     // Use Claude for drafts — DeepSeek produces generic corporate-speak
     const actionPrompt = `You are drafting REAL business communications for Zach Stock, founder of Recapture Insurance (an MGA specializing in senior living/healthcare insurance). Today is ${today}.${standingDecisions}
 
@@ -727,9 +724,6 @@ ZACH'S WRITING STYLE:
 - When he knows someone well: casual, warm. When cold outreach: professional but not stiff.
 
 YOUR JOB: Generate 3-5 work items. For EACH email, write a COMPLETE draft that Zach would actually send with minimal editing.
-
-ACTIVE LESSONS (from past cycles — respect these):
-${correctionRulesForActions}
 
 RULES:
 1. Every email MUST have: real recipient name, email address (from the Key People data), specific subject line, FULL body text (not an outline).
