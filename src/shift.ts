@@ -196,6 +196,20 @@ async function tick() {
 
     db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_full_cycle', ?, datetime('now'))").run(JSON.stringify(new Date().toISOString()));
 
+    // Source health monitor — check all ingestion sources for staleness
+    console.log('[shift]   Running source health monitor...');
+    try {
+      const { runHealthCheck } = await import('./source-health.js');
+      const health = await runHealthCheck(db);
+      if (health.criticals.length > 0) {
+        console.log(`[shift]   🚨 ${health.criticals.length} CRITICAL: ${health.criticals.join('; ')}`);
+      } else {
+        console.log('[shift]   ✓ All sources healthy');
+      }
+    } catch (err: any) {
+      console.log('[shift]   Health check failed: ' + (err.message || '').slice(0, 60));
+    }
+
     // Auto-sync: commit and push any changes after full cycle
     try {
       const { execSync } = await import("child_process");

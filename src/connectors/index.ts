@@ -16,14 +16,32 @@ export interface SyncResult {
 export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
   const results: SyncResult[] = [];
 
-  // Gmail
-  const gmailTokens = getConfig(db, 'gmail_tokens');
-  if (gmailTokens) {
+  // Gmail — use service account for Zach's inbox (domain-wide delegation)
+  // The OAuth token is for quinn@ (system email). Service account accesses all domain accounts.
+  const saConfig = getConfig(db, 'gmail_service_account');
+  const gmailEmail = getConfig(db, 'gmail_email') || 'zach.stock@recaptureinsurance.com';
+  if (saConfig) {
     try {
-      const { items } = await scanGmail(db, { days: 7, maxThreads: 50 });
+      const { items } = await scanGmail(db, {
+        days: 14,
+        maxThreads: 100,
+        sourceAccount: gmailEmail as string,
+        useServiceAccount: true,
+      });
       results.push({ source: 'gmail', items });
     } catch (err: any) {
       results.push({ source: 'gmail', items: 0, error: err.message });
+    }
+  } else {
+    // Fallback to OAuth tokens if no service account
+    const gmailTokens = getConfig(db, 'gmail_tokens');
+    if (gmailTokens) {
+      try {
+        const { items } = await scanGmail(db, { days: 14, maxThreads: 100 });
+        results.push({ source: 'gmail', items });
+      } catch (err: any) {
+        results.push({ source: 'gmail', items: 0, error: err.message });
+      }
     }
   }
 

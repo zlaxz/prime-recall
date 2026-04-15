@@ -588,36 +588,11 @@ const cosPrompt = [
 
     console.log('    Phase 3: COS agent reasoning (Opus with MCP tools, up to 20 turns)...');
 
-    // Call the proxy /claude endpoint with MCP tools enabled and high max-turns
-    const { request: httpRequest } = await import('http');
-    const response: string = await new Promise((resolve, reject) => {
-      const body = JSON.stringify({
-        prompt: cosPrompt,
-        timeout: 600,
-        args: ['--max-turns', '20'],
-      });
-      const req = httpRequest('http://localhost:3211/claude', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        timeout: 660000,
-      }, (res) => {
-        let data = '';
-        res.on('data', (d: Buffer) => { data += d.toString(); });
-        res.on('end', () => {
-          if (res.statusCode === 200) {
-            try {
-              const parsed = JSON.parse(data);
-              resolve(parsed.result || '');
-            } catch { resolve(data); }
-          } else {
-            reject(new Error('Proxy returned ' + res.statusCode + ': ' + data.slice(0, 200)));
-          }
-        });
-      });
-      req.on('error', (err) => reject(err));
-      req.on('timeout', () => { req.destroy(); reject(new Error('Agent timeout')); });
-      req.write(body);
-      req.end();
+    // Call Claude via runClaude (proxy → fallback to direct)
+    const { runClaude } = await import('./utils/claude-spawn.js');
+    const response = await runClaude(cosPrompt, {
+      maxTurns: 20,
+      timeout: 600000,
     });
 
     // Agent manages its own tool-use sessions

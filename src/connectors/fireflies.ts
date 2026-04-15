@@ -189,6 +189,7 @@ export async function scanFireflies(
         // Build FULL content for extraction — include transcript if available
         const sentences = meeting.sentences || [];
         let transcriptText = '';
+        let fullTranscript = '';
         if (sentences.length > 0) {
           let currentSpeaker = '';
           const parts: string[] = [];
@@ -199,7 +200,8 @@ export async function scanFireflies(
             }
             parts.push(s.text);
           }
-          transcriptText = parts.join('\n').slice(0, 12000); // Rich transcript for extraction
+          fullTranscript = parts.join('\n');
+          transcriptText = fullTranscript.slice(0, 12000); // Truncated for LLM extraction only
         }
 
         const content = [
@@ -257,10 +259,10 @@ export async function scanFireflies(
 
         insertKnowledge(db, item);
 
-        // Cache the full transcript as raw_content for source retrieval
-        if (transcriptText) {
+        // Cache the FULL transcript as raw_content for source retrieval (no truncation)
+        if (fullTranscript || transcriptText) {
           db.prepare('UPDATE knowledge SET raw_content = ?, extraction_version = 3 WHERE source_ref = ?')
-            .run(transcriptText, `fireflies:${meeting.id}`);
+            .run(fullTranscript || transcriptText, `fireflies:${meeting.id}`);
         }
 
         stats.items++;

@@ -294,19 +294,28 @@ export async function scanGmail(
 
   
   // Pre-extraction noise filter: skip items that are clearly not business intelligence
-  const NOISE_PATTERNS = [
-    /newsletter/i, /unsubscribe/i, /marketing.*email/i, /promotional/i,
-    /daily.*digest/i, /weekly.*report/i, /auto-?generated/i,
-    /noreply|no-reply|donotreply/i, /receipt.*payment/i,
-    /SeatGeek|OpenTable|Yelp|DoorDash/i, /Gusto.*new tasks/i,
-    /pdfFiller|RingCentral|Mailsuite/i, /surveymonkey|typeform/i,
-    /Amazon Business|promo.*code/i, /Frank Kern/i,
-    /quinn@recaptureinsurance\.com/i, // NEVER ingest Quinn's emails — system output, not source data
+  // IMPORTANT: Only match against SUBJECT and FROM — not full content.
+  // Matching full content was too aggressive (filtered business threads mentioning Gusto, Quinn, etc.)
+  const NOISE_SUBJECT_PATTERNS = [
+    /newsletter/i, /unsubscribe/i, /promotional/i,
+    /daily.*digest/i, /weekly.*report/i,
+    /receipt.*payment/i, /order.*confirm/i,
+    /promo.*code/i,
+  ];
+  const NOISE_FROM_PATTERNS = [
+    /noreply|no-reply|donotreply/i,
+    /SeatGeek|OpenTable|Yelp|DoorDash/i,
+    /pdfFiller|Mailsuite/i, /surveymonkey|typeform/i,
+    /marketing@|promotions@|news@|digest@/i,
   ];
   const beforeNoise = threadData.length;
   const filtered = threadData.filter(td => {
-    const text = (td.subject + ' ' + td.content).slice(0, 500);
-    return !NOISE_PATTERNS.some(p => p.test(text));
+    const subjectNoise = NOISE_SUBJECT_PATTERNS.some(p => p.test(td.subject));
+    const fromNoise = NOISE_FROM_PATTERNS.some(p => p.test(td.lastFrom));
+    if (subjectNoise || fromNoise) {
+      console.log(`    noise: "${td.subject.slice(0, 50)}" from ${td.lastFrom.slice(0, 40)}`);
+    }
+    return !subjectNoise && !fromNoise;
   });
   if (beforeNoise - filtered.length > 0) {
     console.log('  Filtered ' + (beforeNoise - filtered.length) + ' noise threads');

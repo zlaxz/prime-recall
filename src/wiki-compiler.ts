@@ -122,15 +122,12 @@ export async function compileWikiPages(db: Database.Database): Promise<CompileRe
           // Extract Quinn's concerns relevant to this project
           let projectConcerns = '';
           if (quinnConcerns) {
-            const lines = quinnConcerns.split('
-').filter((l: string) =>
+            const lines = quinnConcerns.split("\n").filter((l: string) =>
               l.toLowerCase().includes(project.toLowerCase()) ||
               l.toLowerCase().includes(project.split(' ')[0].toLowerCase())
             );
             if (lines.length > 0) {
-              projectConcerns = 'COS PRIORITY — Quinn is specifically watching:
-' + lines.join('
-');
+              projectConcerns = "COS PRIORITY — Quinn is specifically watching:\n" + lines.join("\n");
             }
           }
 
@@ -138,17 +135,14 @@ export async function compileWikiPages(db: Database.Database): Promise<CompileRe
           const pmState = db.prepare(
             "SELECT concerns FROM agent_state WHERE agent_type = 'pm' AND subject_id = ?"
           ).get(project) as any;
-          const pmConcerns = pmState?.concerns ? 'PM CONCERNS:
-' + pmState.concerns.slice(0, 500) : '';
+          const pmConcerns = pmState?.concerns ? "PM CONCERNS:\n" + pmState.concerns.slice(0, 500) : '';
 
           const result = await compileProjectWiki(db, project, {
             maxTurns: state?.last_wiki_page ? 30 : 100,
             previousPage: state?.last_wiki_page || undefined,
             memory: state?.memory || undefined,
             // Pass downstream context as soul (injected at top of prompt)
-            soul: [projectConcerns, pmConcerns].filter(Boolean).join('
-
-') || undefined,
+            soul: [projectConcerns, pmConcerns].filter(Boolean).join("\n\n") || undefined,
           });
 
           // Parse memory from agent output

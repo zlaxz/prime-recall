@@ -131,7 +131,7 @@ async function executeTool(db: Database.Database, name: string, args: any): Prom
           SELECT k.title, substr(k.summary, 1, 300) as summary, k.source, k.source_date, k.source_ref, k.source_account
           FROM knowledge_fts fts
           JOIN knowledge k ON k.rowid = fts.rowid
-          WHERE k.source NOT IN ('agent-report', 'agent-notification', 'briefing', 'playbook', 'cos-insight', 'verification')
+          WHERE k.source NOT IN ('agent-report', 'agent-notification', 'briefing', 'playbook', 'cos-insight', 'verification', 'quinn-response')
           ${args.project ? "AND k.project = '" + args.project.replace(/'/g, "''") + "'" : ''}
           AND knowledge_fts MATCH ?
           ORDER BY fts.rank LIMIT ?

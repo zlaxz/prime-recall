@@ -656,6 +656,23 @@ export async function chatMessage(
   // Keep action blocks visible in chat but mark them
   // (the UI will render them as interactive cards)
 
+  // Store assistant response in KB for agent access
+  try {
+    const { insertKnowledge } = await import('../db.js');
+    insertKnowledge(db, {
+      id: uuid(),
+      title: `Quinn response: ${response.slice(0, 80)}`,
+      summary: response.slice(0, 2000),
+      source: 'quinn-response',
+      source_ref: `chat:${sessionId}:assistant:${Date.now()}`,
+      source_date: new Date().toISOString(),
+      tags: ['quinn-response'],
+      importance: 'normal',
+      provenance: 'derived',
+      metadata: { session_id: sessionId, intent },
+    });
+  } catch { /* non-critical */ }
+
   // Save assistant message
   const assistantMsgId = uuid();
   const searchResult = await search(db, opts.message, { limit: 5, rerank: false });
@@ -668,15 +685,15 @@ export async function chatMessage(
     VALUES (?, ?, 'assistant', ?, ?, ?, ?, datetime('now'))
   `).run(assistantMsgId, sessionId, response, JSON.stringify(sources), JSON.stringify(actionIds), intent);
 
-  // ── Extract user decisions/corrections and store as knowledge ──
-  // When the user says "I handled X", "X is done", "I decided to Y", etc.
-  // store it so the dream pipeline and future sessions know about it
+  // ── Store ALL substantive user messages as knowledge ──
+  // Every CEO statement is primary source material that agents need to find
   try {
     const userLower = opts.message.toLowerCase();
     const isDecision = /\b(decided|done|handled|completed|paused|stopped|cancelled|postponed|approved|rejected|signed|confirmed|changed|updated|moved|dropped)\b/.test(userLower);
     const isCorrection = /\b(wrong|incorrect|not right|actually|no that's|stop showing|already|don't|doesn't|isn't)\b/.test(userLower);
+    const isSubstantive = opts.message.trim().length > 3 && !opts.message.startsWith('[');
 
-    if (isDecision || isCorrection) {
+    if (isDecision || isCorrection || isSubstantive) {
       const { insertKnowledge } = await import('../db.js');
       insertKnowledge(db, {
         id: uuid(),
@@ -685,10 +702,11 @@ export async function chatMessage(
         source: 'user-feedback',
         source_ref: `chat:${sessionId}:${userMsgId}`,
         source_date: new Date().toISOString(),
-        tags: isCorrection ? ['user-correction', 'feedback'] : ['user-decision', 'feedback'],
+        tags: isCorrection ? ['user-correction', 'feedback'] : isDecision ? ['user-decision', 'feedback'] : ['ceo-input', 'feedback'],
         project: session.primary_project || undefined,
-        importance: 'high',
-        metadata: { session_id: sessionId, intent, type: isCorrection ? 'correction' : 'decision' },
+        importance: isCorrection ? 'critical' : 'high',
+        provenance: 'primary',
+        metadata: { session_id: sessionId, intent, type: isCorrection ? 'correction' : isDecision ? 'decision' : 'ceo-statement' },
       });
 
       // If it's a correction, also create a strategic lesson
