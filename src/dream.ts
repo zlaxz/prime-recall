@@ -68,60 +68,25 @@ export const PERSISTENT_SESSIONS = {
 };
 
 async function callClaudeOnce(prompt: string, timeoutMs: number = 300000, sessionId?: string): Promise<string> {
-  // Try the headless proxy first (no Terminal windows, has GUI Keychain access)
+  // Use the shared runClaude utility which handles the proxy's 64KB body limit
+  // by falling back to curl for large prompts
   try {
-    const proxyUrl = 'http://localhost:3211/claude';
-    const { request: httpRequest } = await import('http');
-    const proxyResult = await new Promise<string>((resolve, reject) => {
-      const body = JSON.stringify({
-        prompt,
-        timeout: Math.floor(timeoutMs / 1000),
-        args: sessionId ? ['--resume', sessionId] : [],
-      });
-      const req = httpRequest(proxyUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        timeout: timeoutMs + 10000, // Give proxy extra time
-      }, (res) => {
-        let data = '';
-        res.on('data', (d: Buffer) => { data += d.toString(); });
-        res.on('end', () => {
-          if (res.statusCode === 200) {
-            try {
-              const parsed = JSON.parse(data);
-              // Store session ID
-              if (parsed.session_id && sessionId === undefined) {
-                try {
-                  const db = getDb();
-                  db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_claude_session_id', ?, datetime('now'))")
-                    .run(JSON.stringify(parsed.session_id));
-                } catch (_e) {}
-              }
-              resolve(parsed.result || '');
-            } catch {
-              resolve(data);
-            }
-          } else {
-            reject(new Error(`Proxy returned ${res.statusCode}: ${data.slice(0, 200)}`));
-          }
-        });
-      });
-      req.on('error', (err) => reject(err));
-      req.on('timeout', () => { req.destroy(); reject(new Error('Proxy timeout')); });
-      req.write(body);
-      req.end();
+    const { runClaude: runClaudeShared } = await import('./utils/claude-spawn.js');
+    const result = await runClaudeShared(prompt, {
+      sessionId,
+      maxTurns: 1,
+      timeout: timeoutMs,
     });
-    return proxyResult;
-  } catch (proxyErr: any) {
-    // Proxy not available — fall back to GUI wrapper or direct CLI
-    if (!proxyErr.message?.includes('ECONNREFUSED')) {
-      console.log(`    Proxy error (falling back): ${proxyErr.message?.slice(0, 60)}`);
-    }
-  }
 
-  // GUI wrapper fallback DISABLED — spawns Terminal windows on headless Mac Mini.
-  // If proxy fails, just throw. The retry logic in callClaude handles recovery.
-  throw new Error('Proxy unavailable and GUI fallback disabled (headless mode)');
+    // Store session ID if returned (for session tracking)
+    // Note: runClaude doesn't return session_id, so we skip this for now
+    return result;
+  } catch (err: any) {
+    if (!err.message?.includes('ECONNREFUSED')) {
+      console.log(`    Proxy error (falling back): ${err.message?.slice(0, 60)}`);
+    }
+    throw new Error('Proxy unavailable and GUI fallback disabled (headless mode)');
+  }
 }
 
 
@@ -3737,16 +3702,14 @@ export async function runDreamPipeline(
   // Runs AFTER all data tasks complete. Takes ALL outputs and REASONS about them.
   // This is the difference between a librarian and a strategist.
   if (!options.quick) {
-    console.log('  Task 24: Intelligence cycle (situation modeling + hypothesis generation + red team)...');
+    console.log('  Task 24: Intelligence cycle v2 (full-context Opus reasoning + FOCUS.md)...');
     const r24 = await runIntelligenceCycleV2(db);
     results.push(r24);
     const r24out = r24.output || {};
     console.log(`    ${r24.status === 'success' ? '✓' : r24.status === 'skipped' ? '○' : '✗'} ${r24.status} (${r24.duration_seconds.toFixed(1)}s)`);
     if (r24.status === 'success') {
-      console.log(`      Situations: ${r24out.situations} | Hypotheses: ${r24out.hypotheses_surviving}/${r24out.hypotheses_generated} survive red team`);
-      console.log(`      Weak signals: ${r24out.weak_signals} | Contradictions: ${r24out.contradictions}`);
-      console.log(`      Top: ${r24out.top_hypothesis}`);
-      console.log(`      >>> ${r24out.the_one_thing}`);
+      console.log(`      Hypotheses: ${r24out.hypotheses} | Weak signals: ${r24out.weak_signals} | Contradictions: ${r24out.contradictions}`);
+      console.log(`      Actions: ${r24out.actions} | Projects: ${r24out.projects} | Prompt: ${r24out.prompt_chars} chars`);
     }
   }
 

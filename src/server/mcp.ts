@@ -362,6 +362,10 @@ srv.tool(
       let soul = '';
       try { soul = readFileSync(homedir + '/.prime/agents/cos/SOUL.md', 'utf-8'); } catch (_e) {}
 
+      // Load FOCUS.md — Quinn's persistent working state from last intelligence cycle
+      let focus = '';
+      try { focus = readFileSync(homedir + '/.prime/FOCUS.md', 'utf-8'); } catch (_e) {}
+
       // Load memory and concerns from agent_state
       const state = db.prepare("SELECT memory, concerns FROM agent_state WHERE agent_type = 'cos' AND subject_id = 'global'").get() as any;
 
@@ -385,6 +389,7 @@ srv.tool(
 
       const parts = [];
       if (soul) parts.push('## YOUR IDENTITY\n' + soul);
+      if (focus) parts.push('## YOUR CURRENT FOCUS (from last intelligence cycle)\n' + focus);
       if (state?.memory) parts.push('## YOUR MEMORY (accumulated across cycles)\n' + state.memory);
       if (state?.concerns) parts.push('## YOUR ACTIVE CONCERNS\n' + state.concerns);
       if (brief) {

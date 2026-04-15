@@ -24,6 +24,13 @@ export async function runIntelligenceCycleV2(db: Database.Database): Promise<Int
   try {
     // ── LOAD EVERYTHING ──
 
+    // 0. Previous cycle state (Quinn's persistent working memory)
+    let previousFocus = '';
+    try {
+      const { readFileSync } = await import('fs');
+      previousFocus = readFileSync((process.env.HOME || '') + '/.prime/FOCUS.md', 'utf-8');
+    } catch (_e) { /* first run — no prior state */ }
+
     // 1. Wiki pages (compiled by research agents — source-verified)
     const pages = db.prepare(
       "SELECT page_type, subject_id, content FROM compiled_pages WHERE length(content) > 50 ORDER BY compiled_at DESC"
@@ -112,6 +119,9 @@ export async function runIntelligenceCycleV2(db: Database.Database): Promise<Int
         ? corrections.map((c: any) => `- ${c.title}`).join('\n')
         : '(none)',
       ``,
+      `## QUINN'S FOCUS (your working state from last cycle)`,
+      previousFocus || '(first cycle — no prior state)',
+      ``,
       `## CEO STATEMENTS (Zach's direct input — primary source)`,
       ceoStatements.length > 0
         ? ceoStatements.map((s: any) => `[${(s.source_date || '').slice(0, 10)}] ${s.summary?.slice(0, 300)}`).join('\n')
@@ -125,10 +135,31 @@ export async function runIntelligenceCycleV2(db: Database.Database): Promise<Int
         ? commitments.map((c: any) => `- [${c.state}] ${c.text}${c.due_date ? ' (due: ' + c.due_date + ')' : ''}${c.owner ? ' — ' + c.owner : ''}`).join('\n')
         : '(none)',
       ``,
+      // ── MIDDLE ZONE (lower attention — reference material, large volume) ──
+      `## COMPILED WIKI PAGES (source-verified by research agents)`,
+      wikiText || '(no wiki pages compiled)',
+      ``,
+      `## CROSS-PROJECT PATTERNS`,
+      patterns ? JSON.parse(patterns).slice(0, 5).map((p: any) => `- ${JSON.stringify(p).slice(0, 200)}`).join('\n') : '(none)',
+      ``,
+      `## SYSTEM LESSONS (what the system learned from past mistakes)`,
+      lessons.length > 0
+        ? lessons.map((l: any) => `- [${l.domain}] ${l.correction_rule}`).join('\n')
+        : '(none)',
+      ``,
+      `## DETECTED GAPS`,
+      gaps ? JSON.parse(gaps).slice(0, 5).map((g: any) => `- [${g.severity}] ${g.type}: ${g.description?.slice(0, 150)}`).join('\n') : '(none)',
+      ``,
+      // ── END ZONE (high attention — actionable, time-sensitive) ──
       `## PM CONCERNS`,
       pmConcerns.length > 0
         ? pmConcerns.map((pm: any) => `[${pm.subject_id} PM]:\n${pm.concerns}`).join('\n\n')
         : '(none)',
+      ``,
+      `## RECENT ACTIVITY (last 48 hours)`,
+      freshItems.length > 0
+        ? freshItems.map((i: any) => `- [${i.source}] ${(i.source_date || '').slice(0, 10)} ${i.title}`).join('\n')
+        : '(nothing new)',
       ``,
       `## QUINN'S MEMORY (your accumulated learnings)`,
       cosState?.memory ? cosState.memory.slice(0, 5000) : '(first cycle)',
@@ -140,25 +171,6 @@ export async function runIntelligenceCycleV2(db: Database.Database): Promise<Int
       threads.length > 0
         ? threads.map((t: any) => `- "${t.title}" — ${t.current_state?.slice(0, 150)}`).join('\n')
         : '(none)',
-      ``,
-      `## CROSS-PROJECT PATTERNS`,
-      patterns ? JSON.parse(patterns).slice(0, 5).map((p: any) => `- ${JSON.stringify(p).slice(0, 200)}`).join('\n') : '(none)',
-      ``,
-      `## SYSTEM LESSONS (what the system learned from past mistakes)`,
-      lessons.length > 0
-        ? lessons.map((l: any) => `- [${l.domain}] ${l.correction_rule}`).join('\n')
-        : '(none)',
-      ``,
-      `## RECENT ACTIVITY (last 48 hours)`,
-      freshItems.length > 0
-        ? freshItems.map((i: any) => `- [${i.source}] ${(i.source_date || '').slice(0, 10)} ${i.title}`).join('\n')
-        : '(nothing new)',
-      ``,
-      `## DETECTED GAPS`,
-      gaps ? JSON.parse(gaps).slice(0, 5).map((g: any) => `- [${g.severity}] ${g.type}: ${g.description?.slice(0, 150)}`).join('\n') : '(none)',
-      ``,
-      `## COMPILED WIKI PAGES (source-verified by research agents)`,
-      wikiText || '(no wiki pages compiled)',
       ``,
       `## YOUR TASK`,
       ``,
@@ -221,11 +233,22 @@ export async function runIntelligenceCycleV2(db: Database.Database): Promise<Int
     console.log(`    Phase 3: Opus 1M reasoning (single call, no tools, ${Math.round(prompt.length / 1000)}K prompt)...`);
 
     // One deep Opus call with full context
+    // Use runClaude from claude-spawn — handles the proxy's 64KB limit
+    // via curl fallback for large prompts
     const { runClaude } = await import('./utils/claude-spawn.js');
     const response = await runClaude(prompt, {
-      maxTurns: 1,  // No tool calls — everything is in the prompt
+      maxTurns: 1,
       timeout: 300000,
     });
+
+    // Save full cycle output for audit trail
+    try {
+      const { writeFileSync, mkdirSync } = await import('fs');
+      const cycleDir = (process.env.HOME || '') + '/.prime/cycles';
+      mkdirSync(cycleDir, { recursive: true });
+      const ts = new Date().toISOString().slice(0, 13).replace(/[T:]/g, '-');
+      writeFileSync(`${cycleDir}/${ts}.md`, `# Intelligence Cycle — ${dateStr}\n\n${response}`);
+    } catch (_e) {}
 
     // Parse JSON from response
     console.log('    Phase 4: Parsing and storing results...');
@@ -267,6 +290,54 @@ export async function runIntelligenceCycleV2(db: Database.Database): Promise<Int
     db.prepare(
       "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('intelligence_actions', ?, datetime('now'))"
     ).run(JSON.stringify(brief.actions || []));
+
+    // Write FOCUS.md — Quinn's persistent working state
+    try {
+      const { writeFileSync, readFileSync: readFs } = await import('fs');
+      const focusPath = (process.env.HOME || '') + '/.prime/FOCUS.md';
+
+      // Preserve cycle log from previous FOCUS.md
+      let prevLog: string[] = [];
+      try {
+        const prev = readFs(focusPath, 'utf-8');
+        const logMatch = prev.match(/## Cycle Log[\s\S]*$/);
+        if (logMatch) {
+          prevLog = logMatch[0].split('\n').filter((l: string) => l.startsWith('- ')).slice(0, 4);
+        }
+      } catch (_e) {}
+
+      const focusContent = [
+        `# Quinn's Working State`,
+        `Updated: ${new Date().toISOString()}`,
+        ``,
+        `## The One Thing`,
+        brief.the_one_thing || '(none identified)',
+        ``,
+        `## Headline`,
+        brief.headline || '',
+        ``,
+        `## Actions`,
+        (brief.actions || []).map((a: any) => `- [${a.lens}] ${a.title}${a.target_person ? ' — ' + a.target_person : ''}`).join('\n') || '(none)',
+        ``,
+        `## Hypotheses`,
+        (brief.hypotheses || []).map((h: any) => `- [${h.confidence}%] ${h.claim}`).join('\n') || '(none)',
+        ``,
+        `## Weak Signals`,
+        (brief.weak_signals || []).map((s: any) => `- ${s.signal}`).join('\n') || '(none)',
+        ``,
+        `## Project Status`,
+        (brief.project_updates || []).map((p: any) => `- ${p.project}: ${p.status}`).join('\n') || '(none)',
+        ``,
+        `## Cycle Log (last 5)`,
+        `- ${new Date().toISOString().slice(0, 16).replace('T', ' ')}: ${brief.headline || 'cycle complete'}`,
+        ...prevLog,
+      ].join('\n');
+
+      writeFileSync(focusPath, focusContent);
+      console.log('    ✓ FOCUS.md updated');
+    } catch (err: any) {
+      console.log(`    ! FOCUS.md write failed: ${err.message?.slice(0, 100)}`);
+    }
 
     const stats = {
       hypotheses: (brief.hypotheses || []).length,

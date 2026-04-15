@@ -137,7 +137,6 @@ async function runClaudeViaProxy(prompt: string, options: {
   maxTurns?: number;
   timeout?: number;
 } = {}): Promise<string> {
-  const { request: httpRequest } = await import('http');
   const args: string[] = [];
   if (options.sessionId) args.push('--resume', options.sessionId);
   if (options.maxTurns) args.push('--max-turns', String(options.maxTurns));
@@ -145,6 +144,13 @@ async function runClaudeViaProxy(prompt: string, options: {
   const timeoutSec = Math.round((options.timeout || 120000) / 1000);
   const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
 
+  // The Swift proxy has a ~64KB body read buffer. For larger payloads,
+  // use curl which handles chunked transfer encoding correctly.
+  if (Buffer.byteLength(body) > 60000) {
+    return runClaudeViaProxyCurl(body, timeoutSec);
+  }
+
+  const { request: httpRequest } = await import('http');
   return new Promise((resolve, reject) => {
     const req = httpRequest({
       hostname: '127.0.0.1',
@@ -163,7 +169,7 @@ async function runClaudeViaProxy(prompt: string, options: {
             resolve(parsed.result || data);
           } catch { resolve(data); }
         } else {
-          reject(new Error('Proxy ' + res.statusCode));
+          reject(new Error(`Proxy returned ${res.statusCode}: ${data.slice(0, 200)}`));
         }
       });
     });
@@ -172,6 +178,39 @@ async function runClaudeViaProxy(prompt: string, options: {
     req.write(body);
     req.end();
   });
+}
+
+/**
+ * For large prompts (>64KB), write to a temp file and use curl
+ * to send to the proxy. Curl handles chunked encoding correctly
+ * with the Swift proxy's body reader.
+ */
+async function runClaudeViaProxyCurl(jsonBody: string, timeoutSec: number): Promise<string> {
+  const { writeFileSync, unlinkSync } = await import('fs');
+  const tmpPath = `/tmp/prime-proxy-${Date.now()}.json`;
+
+  try {
+    writeFileSync(tmpPath, jsonBody);
+
+    const { stdout, stderr } = await execFileAsync('/usr/bin/curl', [
+      '-s', '-X', 'POST',
+      'http://127.0.0.1:3211/claude',
+      '-H', 'Content-Type: application/json',
+      '-d', `@${tmpPath}`,
+      '--max-time', String(timeoutSec + 30),
+    ], { timeout: (timeoutSec + 60) * 1000, maxBuffer: 10 * 1024 * 1024 });
+
+    try {
+      const parsed = JSON.parse(stdout);
+      if (parsed.error) throw new Error(`Proxy error: ${parsed.error}`);
+      return parsed.result || stdout;
+    } catch (parseErr: any) {
+      if (stdout.includes('error')) throw new Error(`Proxy: ${stdout.slice(0, 200)}`);
+      return stdout;
+    }
+  } finally {
+    try { unlinkSync(tmpPath); } catch {}
+  }
 }
 
 /**
