@@ -269,17 +269,12 @@ export async function scanGmail(
   }
   console.log(`\n  ${threadData.length} threads with content`);
 
-  // Update pass: check existing threads for new messages AND backfill raw_content
+  // Update pass: check existing threads for new messages (replies)
   let updatedThreads = 0;
   for (const td of threadData) {
     const sourceRef = `thread:${td.id}`;
-    const existing = db.prepare('SELECT id, metadata, raw_content FROM knowledge WHERE source_ref = ?').get(sourceRef) as any;
+    const existing = db.prepare('SELECT id, metadata FROM knowledge WHERE source_ref = ?').get(sourceRef) as any;
     if (!existing) continue;
-
-    // Always backfill raw_content if missing (full message bodies now available)
-    if (!existing.raw_content || existing.raw_content.length < 100) {
-      db.prepare('UPDATE knowledge SET raw_content = ? WHERE id = ?').run(td.content, existing.id);
-    }
 
     const meta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata || '{}') : (existing.metadata || {});
     const storedCount = meta.message_count || 0;
@@ -425,10 +420,11 @@ export async function scanGmail(
 
       insertKnowledge(db, item);
 
-      // Preserve raw content — always store the full thread content
-      // so prime_retrieve returns actual email text, not empty raw_content
-      db.prepare('UPDATE knowledge SET raw_content = ? WHERE source_ref = ?')
-        .run(td.content, `thread:${td.id}`);
+      // NOTE: We do NOT store raw_content here — that would bloat the DB.
+      // raw_content is a CACHE populated on-demand by prime_retrieve
+      // when it goes to the Gmail API shelf to fetch full content.
+      // The extraction above already saw the full message bodies
+      // (fetched with format: 'full'), so the index card is high-quality.
 
       // Mark extraction version for future re-extraction tracking
       db.prepare('UPDATE knowledge SET extraction_version = ? WHERE source_ref = ?')
