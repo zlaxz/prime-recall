@@ -105,8 +105,14 @@ export async function runIntelligenceCycleV2(db: Database.Database): Promise<Int
     const dayName = dayNames[now.getDay()];
     const dateStr = `${dayName}, ${now.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
 
-    const contextSize = [wikiText, JSON.stringify(ceoStatements), calendarText, JSON.stringify(commitments)].join('').length;
-    console.log(`    Context: ${Math.round(contextSize / 1000)}K chars loaded into prompt`);
+    // Cap wiki text to keep total prompt under 120K (proxy limit is ~128KB)
+    const MAX_WIKI_CHARS = 60000;
+    const cappedWikiText = wikiText.length > MAX_WIKI_CHARS
+      ? wikiText.slice(0, MAX_WIKI_CHARS) + `\n\n[... ${Math.round((wikiText.length - MAX_WIKI_CHARS) / 1000)}K chars truncated — ${pages.length} total pages]`
+      : wikiText;
+
+    const contextSize = [cappedWikiText, JSON.stringify(ceoStatements), calendarText, JSON.stringify(commitments)].join('').length;
+    console.log(`    Context: ${Math.round(contextSize / 1000)}K chars loaded into prompt (wiki: ${Math.round(wikiText.length / 1000)}K, capped to ${Math.round(cappedWikiText.length / 1000)}K)`);
 
     const prompt = [
       `You are Quinn Parker, AI Chief of Staff to Zach Stock at Recapture Insurance.`,
@@ -137,7 +143,7 @@ export async function runIntelligenceCycleV2(db: Database.Database): Promise<Int
       ``,
       // ── MIDDLE ZONE (lower attention — reference material, large volume) ──
       `## COMPILED WIKI PAGES (source-verified by research agents)`,
-      wikiText || '(no wiki pages compiled)',
+      cappedWikiText || '(no wiki pages compiled)',
       ``,
       `## CROSS-PROJECT PATTERNS`,
       patterns ? JSON.parse(patterns).slice(0, 5).map((p: any) => `- ${JSON.stringify(p).slice(0, 200)}`).join('\n') : '(none)',
