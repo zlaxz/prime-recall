@@ -200,11 +200,11 @@ export async function scanGmail(
     const batch = threads.slice(i, i + 10);
     const results = await Promise.all(batch.map(async (threadMeta) => {
       try {
+        // Fetch full message content (not just metadata) so raw_content has actual email bodies
         const thread = await gmail.users.threads.get({
           userId: 'me',
           id: threadMeta.id!,
-          format: 'metadata',
-          metadataHeaders: ['From', 'To', 'Cc', 'Bcc', 'Subject', 'Date', 'Reply-To'],
+          format: 'full',
         });
         const messages = thread.data.messages || [];
         if (messages.length === 0) return null;
@@ -215,11 +215,48 @@ export async function scanGmail(
         const from = getHeader(first, 'From');
         const lastFrom = getHeader(last, 'From');
         const lastDate = getHeader(last, 'Date');
-        const snippet = last.snippet || '';
+
+        // Extract plain text body from each message
+        const getBody = (msg: any): string => {
+          const parts = msg.payload?.parts || [];
+          // Try to find text/plain part
+          for (const part of parts) {
+            if (part.mimeType === 'text/plain' && part.body?.data) {
+              return Buffer.from(part.body.data, 'base64').toString('utf-8');
+            }
+            // Check nested parts (multipart/alternative)
+            if (part.parts) {
+              for (const sub of part.parts) {
+                if (sub.mimeType === 'text/plain' && sub.body?.data) {
+                  return Buffer.from(sub.body.data, 'base64').toString('utf-8');
+                }
+              }
+            }
+          }
+          // Fallback: body directly on payload (simple messages)
+          if (msg.payload?.body?.data) {
+            return Buffer.from(msg.payload.body.data, 'base64').toString('utf-8');
+          }
+          // Last resort: snippet
+          return msg.snippet || '';
+        };
+
+        // Build full thread content as readable text
+        const threadContent = messages.map((msg: any) => {
+          const msgFrom = getHeader(msg, 'From');
+          const msgDate = getHeader(msg, 'Date');
+          const body = getBody(msg);
+          return `--- ${msgFrom} (${msgDate}) ---\nSubject: ${subject}\n${body}`;
+        }).join('\n\n');
+
+        // Truncate if extremely long (>50K chars) to avoid extraction timeout
+        const content = threadContent.length > 50000
+          ? threadContent.slice(0, 50000) + '\n\n[... truncated, full content in raw_content ...]'
+          : threadContent;
 
         return {
           id: threadMeta.id!,
-          content: `Email thread: "${subject}"\nFrom: ${from}\n${messages.length} messages, last from ${lastFrom} on ${lastDate}\nLast message: ${snippet}`,
+          content,
           subject, lastFrom, lastDate,
           messageCount: messages.length,
         };
@@ -294,19 +331,28 @@ export async function scanGmail(
 
   
   // Pre-extraction noise filter: skip items that are clearly not business intelligence
-  const NOISE_PATTERNS = [
-    /newsletter/i, /unsubscribe/i, /marketing.*email/i, /promotional/i,
-    /daily.*digest/i, /weekly.*report/i, /auto-?generated/i,
-    /noreply|no-reply|donotreply/i, /receipt.*payment/i,
-    /SeatGeek|OpenTable|Yelp|DoorDash/i, /Gusto.*new tasks/i,
-    /pdfFiller|RingCentral|Mailsuite/i, /surveymonkey|typeform/i,
-    /Amazon Business|promo.*code/i, /Frank Kern/i,
-    /quinn@recaptureinsurance\.com/i, // NEVER ingest Quinn's emails — system output, not source data
+  // IMPORTANT: Only match against SUBJECT and FROM — not full content.
+  // Matching full content was too aggressive (filtered business threads mentioning Gusto, Quinn, etc.)
+  const NOISE_SUBJECT_PATTERNS = [
+    /newsletter/i, /unsubscribe/i, /promotional/i,
+    /daily.*digest/i, /weekly.*report/i,
+    /receipt.*payment/i, /order.*confirm/i,
+    /promo.*code/i,
+  ];
+  const NOISE_FROM_PATTERNS = [
+    /noreply|no-reply|donotreply/i,
+    /SeatGeek|OpenTable|Yelp|DoorDash/i,
+    /pdfFiller|Mailsuite/i, /surveymonkey|typeform/i,
+    /marketing@|promotions@|news@|digest@/i,
   ];
   const beforeNoise = threadData.length;
   const filtered = threadData.filter(td => {
-    const text = (td.subject + ' ' + td.content).slice(0, 500);
-    return !NOISE_PATTERNS.some(p => p.test(text));
+    const subjectNoise = NOISE_SUBJECT_PATTERNS.some(p => p.test(td.subject));
+    const fromNoise = NOISE_FROM_PATTERNS.some(p => p.test(td.lastFrom));
+    if (subjectNoise || fromNoise) {
+      console.log(`    noise: "${td.subject.slice(0, 50)}" from ${td.lastFrom.slice(0, 40)}`);
+    }
+    return !subjectNoise && !fromNoise;
   });
   if (beforeNoise - filtered.length > 0) {
     console.log('  Filtered ' + (beforeNoise - filtered.length) + ' noise threads');
@@ -373,6 +419,12 @@ export async function scanGmail(
       };
 
       insertKnowledge(db, item);
+
+      // NOTE: We do NOT store raw_content here — that would bloat the DB.
+      // raw_content is a CACHE populated on-demand by prime_retrieve
+      // when it goes to the Gmail API shelf to fetch full content.
+      // The extraction above already saw the full message bodies
+      // (fetched with format: 'full'), so the index card is high-quality.
 
       // Mark extraction version for future re-extraction tracking
       db.prepare('UPDATE knowledge SET extraction_version = ? WHERE source_ref = ?')

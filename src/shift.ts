@@ -102,7 +102,7 @@ async function tick() {
     console.log('[shift]   Running dream pipeline (project/entity profiles, commitments)...');
     try {
       const { runDreamPipeline } = await import('./dream.js');
-      const dreamResult = await runDreamPipeline({ quick: false }); // Full mode — includes intelligence cycle, hypotheses, questions
+      const dreamResult = await runDreamPipeline({ quick: true }); // SQL tasks only — LLM tasks replaced by wiki agents + PMs
       const succeeded = dreamResult.tasks.filter((t: any) => t.status === 'success').length;
       const failed = dreamResult.tasks.filter((t: any) => t.status === 'failed').length;
       console.log('[shift]   Dream: ' + succeeded + ' succeeded, ' + failed + ' failed (' + dreamResult.total_duration.toFixed(0) + 's)');
@@ -195,6 +195,20 @@ async function tick() {
     } catch (e) {}
 
     db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_full_cycle', ?, datetime('now'))").run(JSON.stringify(new Date().toISOString()));
+
+    // Source health monitor — check all ingestion sources for staleness
+    console.log('[shift]   Running source health monitor...');
+    try {
+      const { runHealthCheck } = await import('./source-health.js');
+      const health = await runHealthCheck(db);
+      if (health.criticals.length > 0) {
+        console.log(`[shift]   🚨 ${health.criticals.length} CRITICAL: ${health.criticals.join('; ')}`);
+      } else {
+        console.log('[shift]   ✓ All sources healthy');
+      }
+    } catch (err: any) {
+      console.log('[shift]   Health check failed: ' + (err.message || '').slice(0, 60));
+    }
 
     // Auto-sync: commit and push any changes after full cycle
     try {
