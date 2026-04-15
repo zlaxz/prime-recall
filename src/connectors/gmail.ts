@@ -200,11 +200,11 @@ export async function scanGmail(
     const batch = threads.slice(i, i + 10);
     const results = await Promise.all(batch.map(async (threadMeta) => {
       try {
+        // Fetch full message content (not just metadata) so raw_content has actual email bodies
         const thread = await gmail.users.threads.get({
           userId: 'me',
           id: threadMeta.id!,
-          format: 'metadata',
-          metadataHeaders: ['From', 'To', 'Cc', 'Bcc', 'Subject', 'Date', 'Reply-To'],
+          format: 'full',
         });
         const messages = thread.data.messages || [];
         if (messages.length === 0) return null;
@@ -215,11 +215,48 @@ export async function scanGmail(
         const from = getHeader(first, 'From');
         const lastFrom = getHeader(last, 'From');
         const lastDate = getHeader(last, 'Date');
-        const snippet = last.snippet || '';
+
+        // Extract plain text body from each message
+        const getBody = (msg: any): string => {
+          const parts = msg.payload?.parts || [];
+          // Try to find text/plain part
+          for (const part of parts) {
+            if (part.mimeType === 'text/plain' && part.body?.data) {
+              return Buffer.from(part.body.data, 'base64').toString('utf-8');
+            }
+            // Check nested parts (multipart/alternative)
+            if (part.parts) {
+              for (const sub of part.parts) {
+                if (sub.mimeType === 'text/plain' && sub.body?.data) {
+                  return Buffer.from(sub.body.data, 'base64').toString('utf-8');
+                }
+              }
+            }
+          }
+          // Fallback: body directly on payload (simple messages)
+          if (msg.payload?.body?.data) {
+            return Buffer.from(msg.payload.body.data, 'base64').toString('utf-8');
+          }
+          // Last resort: snippet
+          return msg.snippet || '';
+        };
+
+        // Build full thread content as readable text
+        const threadContent = messages.map((msg: any) => {
+          const msgFrom = getHeader(msg, 'From');
+          const msgDate = getHeader(msg, 'Date');
+          const body = getBody(msg);
+          return `--- ${msgFrom} (${msgDate}) ---\nSubject: ${subject}\n${body}`;
+        }).join('\n\n');
+
+        // Truncate if extremely long (>50K chars) to avoid extraction timeout
+        const content = threadContent.length > 50000
+          ? threadContent.slice(0, 50000) + '\n\n[... truncated, full content in raw_content ...]'
+          : threadContent;
 
         return {
           id: threadMeta.id!,
-          content: `Email thread: "${subject}"\nFrom: ${from}\n${messages.length} messages, last from ${lastFrom} on ${lastDate}\nLast message: ${snippet}`,
+          content,
           subject, lastFrom, lastDate,
           messageCount: messages.length,
         };
@@ -232,12 +269,17 @@ export async function scanGmail(
   }
   console.log(`\n  ${threadData.length} threads with content`);
 
-  // Update pass: check existing threads for new messages (replies)
+  // Update pass: check existing threads for new messages AND backfill raw_content
   let updatedThreads = 0;
   for (const td of threadData) {
     const sourceRef = `thread:${td.id}`;
-    const existing = db.prepare('SELECT id, metadata FROM knowledge WHERE source_ref = ?').get(sourceRef) as any;
+    const existing = db.prepare('SELECT id, metadata, raw_content FROM knowledge WHERE source_ref = ?').get(sourceRef) as any;
     if (!existing) continue;
+
+    // Always backfill raw_content if missing (full message bodies now available)
+    if (!existing.raw_content || existing.raw_content.length < 100) {
+      db.prepare('UPDATE knowledge SET raw_content = ? WHERE id = ?').run(td.content, existing.id);
+    }
 
     const meta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata || '{}') : (existing.metadata || {});
     const storedCount = meta.message_count || 0;
@@ -382,6 +424,11 @@ export async function scanGmail(
       };
 
       insertKnowledge(db, item);
+
+      // Preserve raw content — always store the full thread content
+      // so prime_retrieve returns actual email text, not empty raw_content
+      db.prepare('UPDATE knowledge SET raw_content = ? WHERE source_ref = ?')
+        .run(td.content, `thread:${td.id}`);
 
       // Mark extraction version for future re-extraction tracking
       db.prepare('UPDATE knowledge SET extraction_version = ? WHERE source_ref = ?')
