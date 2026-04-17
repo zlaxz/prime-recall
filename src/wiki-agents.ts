@@ -153,11 +153,16 @@ export async function compileEntityPage(db: Database.Database, entityName: strin
     '',
     'TODAY IS: ' + dateStr + '.',
     '',
-    'PROCESS:',
-    '1. Call prime_entity with "' + entityName + '" to get their profile',
-    '2. Call prime_search with "' + entityName + '" to find all related items',
-    '3. For the 3 most recent items involving this person, call prime_retrieve to read ACTUAL source',
-    '4. Write the wiki page based on what you ACTUALLY READ',
+    'PROCESS — CRAWL, don\'t just search once:',
+    '1. Call prime_entity with "' + entityName + '" — note their connections, organizations, projects',
+    '2. Search BROADLY — do multiple searches:',
+    '   - Search "' + entityName + '" (full name)',
+    '   - Search their FIRST NAME alone (catches informal references)',
+    '   - Search their ORGANIZATION/COMPANY name (catches threads about their company)',
+    '   - Search any connected PROJECT they\'re involved in + their name',
+    '3. RETRIEVE at least 5-8 actual sources — prioritize meeting transcripts (fireflies, otter), Claude conversations, and cowork sessions over email summaries. These have the richest context.',
+    '4. Follow connections — if the entity profile mentions relationships, search for threads involving BOTH people',
+    '5. Write the wiki page based on what you ACTUALLY READ across ALL source types',
     '',
     'OUTPUT FORMAT (return ONLY this markdown):',
     '# ' + entityName,
@@ -182,7 +187,7 @@ export async function compileEntityPage(db: Database.Database, entityName: strin
     correctionText,
   ].join('\n');
 
-  const result = await callAgent(prompt, 12, 240);
+  const result = await callAgent(prompt, 30, 360); // More turns for crawling across sources
 
   let page = result;
   const mdMatch = result.match(/```(?:markdown)?\n([\s\S]*?)```/);
