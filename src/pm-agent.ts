@@ -87,8 +87,8 @@ async function callProxy(prompt: string, maxTurns: number, timeoutSec: number, s
 export async function runPMAgent(db: Database.Database, config: PMConfig): Promise<PMResult> {
   const start = Date.now();
   const dir = getAgentDir(config.agentId);
-  const maxTurns = config.maxTurns || 25;
-  const timeoutSec = config.timeoutSec || 600;
+  const maxTurns = config.maxTurns || 200; // Claude via proxy — 1M context, let it investigate
+  const timeoutSec = config.timeoutSec || 900;
 
   // Load agent identity and memory
   const soul = readFile(join(dir, 'SOUL.md'));

@@ -16,7 +16,9 @@ import { request as httpRequest } from 'http';
 // ============================================================
 
 // Call the proxy /claude endpoint with MCP tools
-async function callAgent(prompt: string, maxTurns: number = 15, timeoutSec: number = 300): Promise<string> {
+// DeepSeek agents: 64K context. ~50 tool calls before context overflow.
+// Each tool result is ~1-2K chars. 50 turns lets the agent crawl broadly.
+async function callAgent(prompt: string, maxTurns: number = 50, timeoutSec: number = 600): Promise<string> {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
       prompt,
@@ -109,7 +111,7 @@ export async function compileProjectPage(db: Database.Database, projectName: str
     correctionText,
   ].join('\n');
 
-  const result = await callAgent(prompt, 15, 300);
+  const result = await callAgent(prompt, 50, 600);
 
   // Extract the markdown page from the response
   let page = result;
@@ -187,7 +189,7 @@ export async function compileEntityPage(db: Database.Database, entityName: strin
     correctionText,
   ].join('\n');
 
-  const result = await callAgent(prompt, 30, 360); // More turns for crawling across sources
+  const result = await callAgent(prompt, 50, 600); // Let the agent crawl across all sources
 
   let page = result;
   const mdMatch = result.match(/```(?:markdown)?\n([\s\S]*?)```/);
