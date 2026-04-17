@@ -144,9 +144,11 @@ async function runClaudeViaProxy(prompt: string, options: {
   const timeoutSec = Math.round((options.timeout || 120000) / 1000);
   const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
 
-  // The Swift proxy has a ~64KB body read buffer. For larger payloads,
-  // use curl which handles chunked transfer encoding correctly.
-  if (Buffer.byteLength(body) > 60000) {
+  // The Swift proxy has a ~64KB body read buffer for http.request,
+  // AND http.request doesn't properly wait for multi-turn tool sessions.
+  // Use curl for: large payloads (>60KB) OR multi-turn sessions (maxTurns > 1).
+  // Curl handles both correctly.
+  if (Buffer.byteLength(body) > 60000 || (options.maxTurns && options.maxTurns > 1)) {
     return runClaudeViaProxyCurl(body, timeoutSec);
   }
 

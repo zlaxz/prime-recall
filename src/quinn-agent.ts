@@ -18,7 +18,9 @@ import { join } from 'path';
  * She decides what to investigate, not the pipeline.
  */
 
-const QUINN_SESSION_ID = '00000000-0000-4000-a000-000000000099'; // Persistent session
+// Generate a fresh session ID for each cycle for now.
+// TODO: Switch to persistent --resume once we verify tool calls work reliably.
+const QUINN_SESSION_ID = undefined; // Fresh session each cycle
 
 interface QuinnResult {
   task: string;
