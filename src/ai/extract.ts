@@ -96,9 +96,9 @@ export async function extractIntelligence(
   const response = await provider.chat(
     [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: content.slice(0, 6000) },
+      { role: 'user', content: content.length > 30000 ? content.slice(0, 12000) + '\n\n[... middle trimmed ...]\n\n' + content.slice(-12000) : content.slice(0, 30000) },
     ],
-    { temperature: 0.1, max_tokens: 1000, json: true }
+    { temperature: 0.1, max_tokens: 2000, json: true }
   );
 
   try {
@@ -240,9 +240,9 @@ export async function extractIntelligenceV2(
   const response = await provider.chat(
     [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: content.slice(0, 12000) },
+      { role: 'user', content: content.length > 30000 ? content.slice(0, 12000) + '\n\n[... middle trimmed ...]\n\n' + content.slice(-12000) : content.slice(0, 30000) },
     ],
-    { temperature: 0.1, max_tokens: 2500, json: true }
+    { temperature: 0.1, max_tokens: 3000, json: true }
   );
 
   try {
