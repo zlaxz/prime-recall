@@ -23,8 +23,8 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
   if (saConfig) {
     try {
       const { items } = await scanGmail(db, {
-        days: 14,
-        maxThreads: 100,
+        days: 400,
+        maxThreads: 500,
         sourceAccount: gmailEmail as string,
         useServiceAccount: true,
       });
@@ -138,8 +138,8 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
       if (member.sync_gmail) {
         try {
           const { items } = await scanGmail(db, {
-            days: 7,
-            maxThreads: 50,
+            days: 400,
+            maxThreads: 500,
             sourceAccount: member.email,
             useServiceAccount: true,
           });
