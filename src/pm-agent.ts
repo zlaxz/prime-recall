@@ -52,37 +52,36 @@ function writeAgentFile(agentId: string, filename: string, content: string) {
   writeFileSync(join(dir, filename), content, 'utf-8');
 }
 
-// Call the proxy to run Opus with MCP tools
+// Call the proxy to run Opus with MCP tools.
+// MUST use curl — http.request returns early before multi-turn tool calls complete.
 async function callProxy(prompt: string, maxTurns: number, timeoutSec: number, sessionId?: string): Promise<{ result: string; sessionId: string }> {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      prompt,
-      timeout: timeoutSec,
-      args: sessionId ? ['--resume', sessionId, '--max-turns', String(maxTurns)] : ['--max-turns', String(maxTurns)],
-    });
-    const req = httpRequest('http://localhost:3211/claude', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: (timeoutSec + 30) * 1000,
-    }, (res) => {
-      let data = '';
-      res.on('data', (d: Buffer) => { data += d.toString(); });
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          try {
-            const parsed = JSON.parse(data);
-            resolve({ result: parsed.result || '', sessionId: parsed.session_id || '' });
-          } catch { resolve({ result: data, sessionId: '' }); }
-        } else {
-          reject(new Error('Proxy returned ' + res.statusCode));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('PM agent timeout')); });
-    req.write(body);
-    req.end();
-  });
+  const { promisify } = await import('util');
+  const { execFile } = await import('child_process');
+  const execFileAsync = promisify(execFile);
+
+  const args = sessionId
+    ? ['--resume', sessionId, '--max-turns', String(maxTurns)]
+    : ['--max-turns', String(maxTurns)];
+
+  const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
+  const tmpPath = `/tmp/pm-proxy-${Date.now()}.json`;
+
+  try {
+    writeFileSync(tmpPath, body);
+    const { stdout } = await execFileAsync('/usr/bin/curl', [
+      '-s', '-X', 'POST',
+      'http://127.0.0.1:3211/claude',
+      '-H', 'Content-Type: application/json',
+      '-d', `@${tmpPath}`,
+      '--max-time', String(timeoutSec + 30),
+    ], { timeout: (timeoutSec + 60) * 1000, maxBuffer: 10 * 1024 * 1024 });
+
+    const parsed = JSON.parse(stdout);
+    if (parsed.error) throw new Error(`Proxy error: ${parsed.error}`);
+    return { result: parsed.result || '', sessionId: parsed.session_id || '' };
+  } finally {
+    try { const { unlinkSync } = await import('fs'); unlinkSync(tmpPath); } catch {}
+  }
 }
 
 export async function runPMAgent(db: Database.Database, config: PMConfig): Promise<PMResult> {
