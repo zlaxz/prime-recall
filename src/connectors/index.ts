@@ -32,6 +32,21 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
     } catch (err: any) {
       results.push({ source: 'gmail', items: 0, error: err.message });
     }
+    // Drive scan for Zach (via same service account)
+    try {
+      const { scanDrive } = await import('./drive.js');
+      const driveResult = await scanDrive(db, {
+        days: 30,
+        maxFiles: 50,
+        sourceAccount: gmailEmail as string,
+      });
+      if (driveResult.items > 0) results.push({ source: 'drive', items: driveResult.items });
+    } catch (err: any) {
+      // Drive scan failed — not critical, log and continue
+      if (!err.message?.includes('not configured')) {
+        results.push({ source: 'drive', items: 0, error: err.message?.slice(0, 80) });
+      }
+    }
   } else {
     // Fallback to OAuth tokens if no service account
     const gmailTokens = getConfig(db, 'gmail_tokens');

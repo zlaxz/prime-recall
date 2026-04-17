@@ -210,6 +210,48 @@ async function tick() {
       console.log('[shift]   Health check failed: ' + (err.message || '').slice(0, 60));
     }
 
+    // Pre-compile context summaries for intelligence cycle
+    console.log('[shift]   Pre-compiling context cache...');
+    try {
+      // Compile corrections context (changes rarely)
+      const corrections = db.prepare(
+        "SELECT title, summary FROM knowledge WHERE source IN ('correction', 'manual', 'training') ORDER BY source_date DESC LIMIT 30"
+      ).all() as any[];
+      db.prepare(`INSERT OR REPLACE INTO compiled_context (key, content, source_count, compiled_at, expires_at)
+        VALUES ('corrections', ?, ?, datetime('now'), datetime('now', '+24 hours'))`)
+        .run(corrections.map((c: any) => `- ${c.title}`).join('\n'), corrections.length);
+
+      // Compile CEO statements context
+      const ceoStatements = db.prepare(
+        "SELECT title, summary, source_date FROM knowledge WHERE source = 'user-feedback' AND provenance = 'primary' ORDER BY source_date DESC LIMIT 20"
+      ).all() as any[];
+      db.prepare(`INSERT OR REPLACE INTO compiled_context (key, content, source_count, compiled_at, expires_at)
+        VALUES ('ceo_statements', ?, ?, datetime('now'), datetime('now', '+4 hours'))`)
+        .run(ceoStatements.map((s: any) => `[${(s.source_date || '').slice(0, 10)}] ${s.summary?.slice(0, 300)}`).join('\n'), ceoStatements.length);
+
+      // Compile commitments context
+      const commitments = db.prepare(
+        "SELECT text, state, due_date, owner, project FROM commitments WHERE state IN ('active', 'overdue') ORDER BY due_date ASC LIMIT 20"
+      ).all() as any[];
+      db.prepare(`INSERT OR REPLACE INTO compiled_context (key, content, source_count, compiled_at, expires_at)
+        VALUES ('commitments', ?, ?, datetime('now'), datetime('now', '+4 hours'))`)
+        .run(commitments.map((c: any) => `- [${c.state}] ${c.text}${c.due_date ? ' (due: ' + c.due_date + ')' : ''}${c.owner ? ' — ' + c.owner : ''}`).join('\n'), commitments.length);
+
+      console.log('[shift]   ✓ Context cache: corrections, ceo_statements, commitments');
+    } catch (err: any) {
+      console.log('[shift]   Context cache failed: ' + (err.message || '').slice(0, 60));
+    }
+
+    // Wiki lint + markdown export
+    console.log('[shift]   Running wiki lint + export...');
+    try {
+      const { lintAndExportWiki } = await import('./wiki-lint.js');
+      const lint = await lintAndExportWiki(db);
+      console.log(`[shift]   Wiki: ${lint.exportedFiles} exported, ${lint.stalePages.length} stale, ${lint.missingPages.length} missing pages`);
+    } catch (err: any) {
+      console.log('[shift]   Wiki lint failed: ' + (err.message || '').slice(0, 60));
+    }
+
     // Auto-sync: commit and push any changes after full cycle
     try {
       const { execSync } = await import("child_process");
