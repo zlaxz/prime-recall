@@ -128,6 +128,18 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
     }
   }
 
+  // Fireflies transcripts
+  const ffKey = getConfig(db, 'fireflies_api_key');
+  if (ffKey) {
+    try {
+      const { scanFireflies } = await import('./fireflies.js');
+      const ffResult = await scanFireflies(db, { days: 30, maxMeetings: 50 });
+      if (ffResult.items > 0) results.push({ source: 'fireflies', items: ffResult.items });
+    } catch (err: any) {
+      results.push({ source: 'fireflies', items: 0, error: err.message?.slice(0, 80) });
+    }
+  }
+
   // Gmail Sent — corrects false awaiting_reply tags + captures Zach-initiated threads
   if (gmailTokens) {
     try {
