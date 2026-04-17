@@ -74,9 +74,10 @@ export async function compileWikiPages(db: Database.Database): Promise<CompileRe
   const toCompile: string[] = [];
 
   for (const p of projects) {
+    const normalizedCheck = p.project.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const existing = db.prepare(
       "SELECT compiled_at, stale FROM compiled_pages WHERE page_type = 'project' AND subject_id = ?"
-    ).get(p.project) as any;
+    ).get(normalizedCheck) as any;
 
     if (existing && !existing.stale) {
       // Check if new data arrived since last compile
@@ -138,7 +139,7 @@ export async function compileWikiPages(db: Database.Database): Promise<CompileRe
           const pmConcerns = pmState?.concerns ? "PM CONCERNS:\n" + pmState.concerns.slice(0, 500) : '';
 
           const result = await compileProjectWiki(db, project, {
-            maxTurns: 200,
+            maxTurns: state?.last_wiki_page ? 30 : 100,
             previousPage: state?.last_wiki_page || undefined,
             memory: state?.memory || undefined,
             // Pass downstream context as soul (injected at top of prompt)
@@ -151,13 +152,20 @@ export async function compileWikiPages(db: Database.Database): Promise<CompileRe
 
           // Store wiki page (without memory section)
           const { v4: uuid } = await import('uuid');
+          // Normalize subject_id to lowercase to prevent case-sensitive duplicates
+          const normalizedId = project.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+          // Clean up any old case-variant pages
+          db.prepare(`DELETE FROM compiled_pages WHERE page_type = 'project' AND subject_id != ? AND lower(replace(subject_id, ' ', '-')) = ?`)
+            .run(normalizedId, normalizedId);
+
           db.prepare(`
             INSERT OR REPLACE INTO compiled_pages (id, page_type, subject_id, subject_name, content,
               version, source_item_count, last_source_date, compiled_at, stale)
             VALUES (?, 'project', ?, ?, ?,
               COALESCE((SELECT version + 1 FROM compiled_pages WHERE page_type = 'project' AND subject_id = ?), 1),
               ?, datetime('now'), datetime('now'), 0)
-          `).run(uuid(), project, project, wikiContent, project, result.sourceRefsRead.length);
+          `).run(uuid(), normalizedId, project, wikiContent, normalizedId, result.sourceRefsRead.length);
 
           // Update agent state with memory
           db.prepare(`

@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { v4 as uuid } from 'uuid';
-import { request as httpRequest } from 'http';
+// http.request removed — all proxy calls via curl now
 
 // ============================================================
 // Wiki Agents — Per-project/entity research agents that maintain
@@ -15,37 +15,38 @@ import { request as httpRequest } from 'http';
 //   6. Prime COS reads wiki pages instead of raw KB
 // ============================================================
 
-// Call the proxy /claude endpoint with MCP tools
-async function callAgent(prompt: string, maxTurns: number = 15, timeoutSec: number = 300): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      prompt,
-      timeout: timeoutSec,
-      args: ['--max-turns', String(maxTurns)],
-    });
-    const req = httpRequest('http://localhost:3211/claude', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: (timeoutSec + 30) * 1000,
-    }, (res) => {
-      let data = '';
-      res.on('data', (d: Buffer) => { data += d.toString(); });
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          try {
-            const parsed = JSON.parse(data);
-            resolve(parsed.result || '');
-          } catch { resolve(data); }
-        } else {
-          reject(new Error('Agent proxy returned ' + res.statusCode));
-        }
-      });
-    });
-    req.on('error', (err) => reject(err));
-    req.on('timeout', () => { req.destroy(); reject(new Error('Agent timeout')); });
-    req.write(body);
-    req.end();
+// Call Claude via proxy for wiki compilation.
+// Uses Sonnet 4.6 (1M context) — good enough for compilation, saves Opus allocation for strategic work.
+// All calls via curl (http.request doesn't wait for tool sessions).
+async function callAgent(prompt: string, maxTurns: number = 50, timeoutSec: number = 600): Promise<string> {
+  const { writeFileSync } = await import('fs');
+  const { promisify } = await import('util');
+  const { execFile } = await import('child_process');
+  const execFileAsync = promisify(execFile);
+
+  const body = JSON.stringify({
+    prompt,
+    timeout: timeoutSec,
+    args: ['--model', 'claude-sonnet-4-6', '--max-turns', String(maxTurns)],
   });
+  const tmpPath = `/tmp/wiki-agent-${Date.now()}.json`;
+
+  try {
+    writeFileSync(tmpPath, body);
+    const { stdout } = await execFileAsync('/usr/bin/curl', [
+      '-s', '-X', 'POST',
+      'http://127.0.0.1:3211/claude',
+      '-H', 'Content-Type: application/json',
+      '-d', `@${tmpPath}`,
+      '--max-time', String(timeoutSec + 30),
+    ], { timeout: (timeoutSec + 60) * 1000, maxBuffer: 10 * 1024 * 1024 });
+
+    const parsed = JSON.parse(stdout);
+    if (parsed.error) throw new Error(`Proxy error: ${parsed.error}`);
+    return parsed.result || '';
+  } finally {
+    try { const { unlinkSync } = await import('fs'); unlinkSync(tmpPath); } catch {}
+  }
 }
 
 // Compile a wiki page for a PROJECT
@@ -109,7 +110,7 @@ export async function compileProjectPage(db: Database.Database, projectName: str
     correctionText,
   ].join('\n');
 
-  const result = await callAgent(prompt, 15, 300);
+  const result = await callAgent(prompt, 50, 600);
 
   // Extract the markdown page from the response
   let page = result;
@@ -153,11 +154,16 @@ export async function compileEntityPage(db: Database.Database, entityName: strin
     '',
     'TODAY IS: ' + dateStr + '.',
     '',
-    'PROCESS:',
-    '1. Call prime_entity with "' + entityName + '" to get their profile',
-    '2. Call prime_search with "' + entityName + '" to find all related items',
-    '3. For the 3 most recent items involving this person, call prime_retrieve to read ACTUAL source',
-    '4. Write the wiki page based on what you ACTUALLY READ',
+    'PROCESS — CRAWL, don\'t just search once:',
+    '1. Call prime_entity with "' + entityName + '" — note their connections, organizations, projects',
+    '2. Search BROADLY — do multiple searches:',
+    '   - Search "' + entityName + '" (full name)',
+    '   - Search their FIRST NAME alone (catches informal references)',
+    '   - Search their ORGANIZATION/COMPANY name (catches threads about their company)',
+    '   - Search any connected PROJECT they\'re involved in + their name',
+    '3. RETRIEVE at least 5-8 actual sources — prioritize meeting transcripts (fireflies, otter), Claude conversations, and cowork sessions over email summaries. These have the richest context.',
+    '4. Follow connections — if the entity profile mentions relationships, search for threads involving BOTH people',
+    '5. Write the wiki page based on what you ACTUALLY READ across ALL source types',
     '',
     'OUTPUT FORMAT (return ONLY this markdown):',
     '# ' + entityName,
@@ -182,7 +188,7 @@ export async function compileEntityPage(db: Database.Database, entityName: strin
     correctionText,
   ].join('\n');
 
-  const result = await callAgent(prompt, 12, 240);
+  const result = await callAgent(prompt, 50, 600); // Let the agent crawl across all sources
 
   let page = result;
   const mdMatch = result.match(/```(?:markdown)?\n([\s\S]*?)```/);

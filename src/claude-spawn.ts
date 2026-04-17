@@ -100,6 +100,7 @@ export async function runClaude(prompt: string, options: {
   outputFormat?: 'json' | 'text';
   maxTurns?: number;
   timeout?: number;
+  model?: string;
 } = {}): Promise<string> {
   // Try proxy first — works on Mac Mini where direct claude -p can't access Keychain
   try {
@@ -140,8 +141,10 @@ async function runClaudeViaProxy(prompt: string, options: {
   sessionId?: string;
   maxTurns?: number;
   timeout?: number;
+  model?: string;
 } = {}): Promise<string> {
   const args: string[] = [];
+  if (options.model) args.push('--model', options.model);
   if (options.sessionId) args.push('--resume', options.sessionId);
   if (options.maxTurns) args.push('--max-turns', String(options.maxTurns));
 

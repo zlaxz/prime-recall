@@ -52,44 +52,43 @@ function writeAgentFile(agentId: string, filename: string, content: string) {
   writeFileSync(join(dir, filename), content, 'utf-8');
 }
 
-// Call the proxy to run Opus with MCP tools
+// Call the proxy to run Opus with MCP tools.
+// MUST use curl — http.request returns early before multi-turn tool calls complete.
 async function callProxy(prompt: string, maxTurns: number, timeoutSec: number, sessionId?: string): Promise<{ result: string; sessionId: string }> {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      prompt,
-      timeout: timeoutSec,
-      args: sessionId ? ['--resume', sessionId, '--max-turns', String(maxTurns)] : ['--max-turns', String(maxTurns)],
-    });
-    const req = httpRequest('http://localhost:3211/claude', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: (timeoutSec + 30) * 1000,
-    }, (res) => {
-      let data = '';
-      res.on('data', (d: Buffer) => { data += d.toString(); });
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          try {
-            const parsed = JSON.parse(data);
-            resolve({ result: parsed.result || '', sessionId: parsed.session_id || '' });
-          } catch { resolve({ result: data, sessionId: '' }); }
-        } else {
-          reject(new Error('Proxy returned ' + res.statusCode));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('PM agent timeout')); });
-    req.write(body);
-    req.end();
-  });
+  const { promisify } = await import('util');
+  const { execFile } = await import('child_process');
+  const execFileAsync = promisify(execFile);
+
+  const args = sessionId
+    ? ['--model', 'claude-opus-4-7', '--resume', sessionId, '--max-turns', String(maxTurns)]
+    : ['--model', 'claude-opus-4-7', '--max-turns', String(maxTurns)];
+
+  const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
+  const tmpPath = `/tmp/pm-proxy-${Date.now()}.json`;
+
+  try {
+    writeFileSync(tmpPath, body);
+    const { stdout } = await execFileAsync('/usr/bin/curl', [
+      '-s', '-X', 'POST',
+      'http://127.0.0.1:3211/claude',
+      '-H', 'Content-Type: application/json',
+      '-d', `@${tmpPath}`,
+      '--max-time', String(timeoutSec + 30),
+    ], { timeout: (timeoutSec + 60) * 1000, maxBuffer: 10 * 1024 * 1024 });
+
+    const parsed = JSON.parse(stdout);
+    if (parsed.error) throw new Error(`Proxy error: ${parsed.error}`);
+    return { result: parsed.result || '', sessionId: parsed.session_id || '' };
+  } finally {
+    try { const { unlinkSync } = await import('fs'); unlinkSync(tmpPath); } catch {}
+  }
 }
 
 export async function runPMAgent(db: Database.Database, config: PMConfig): Promise<PMResult> {
   const start = Date.now();
   const dir = getAgentDir(config.agentId);
-  const maxTurns = config.maxTurns || 50;
-  const timeoutSec = config.timeoutSec || 600;
+  const maxTurns = config.maxTurns || 200; // Claude via proxy — 1M context, let it investigate
+  const timeoutSec = config.timeoutSec || 900;
 
   // Load agent identity and memory
   const soul = readFile(join(dir, 'SOUL.md'));
@@ -119,9 +118,15 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     '',
     'You have MCP tools. Use them to investigate what\'s new since your last cycle.',
     'Search for recent emails, check commitments, check the calendar.',
-    'Read actual source material — don\'t rely on summaries.',
+    'Read actual source material via prime_retrieve — don\'t rely on summaries.',
     '',
-    'After investigating, produce THREE outputs separated by these exact markers:',
+    'CRITICAL RULES FOR ACCURACY:',
+    '- VERIFY OWNERSHIP: Before saying "Person X owns task Y," search for emails between X and the relevant party. Check WHO is actually in the email thread. If Zach has been emailing someone directly, that is Zach\'s relationship — do not attribute it to a team member just because they were mentioned nearby.',
+    '- CITE OR DELETE: Every factual claim must trace to a specific email you retrieved via prime_retrieve. If you only read a summary or search result, you do NOT have evidence. Either retrieve the source or delete the claim.',
+    '- SEPARATE VERIFIED FROM ASSUMED: In your wiki page, mark claims as [VERIFIED: thread:ID] or [UNVERIFIED: inference from summary]. Do not present inferences as facts.',
+    '- CHECK YOUR PRIOR ASSUMPTIONS: Your memory from last cycle may be wrong. If you wrote "Forrest is handling X" last cycle, verify it this cycle by checking who is actually emailing about X.',
+    '',
+    'After investigating AND verifying your claims, produce THREE outputs separated by these exact markers:',
     '',
     '---WIKI_PAGE---',
     '(Your updated wiki page for ' + config.project + ')',
