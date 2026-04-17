@@ -15,6 +15,7 @@ import { task15PredictionVerification, task16StrategicReflection, getCorrectionR
 import { task17ThreadBuilder, getThreadContext } from './narrative-threads.js';
 import { runIntelligenceCycle } from './intelligence-cycle.js';
 import { runIntelligenceCycleV2 } from './intelligence-cycle-v2.js';
+import { runQuinnAgent } from './quinn-agent.js';
 import { runClaude } from './utils/claude-spawn.js';
 import { getBulkProvider } from './ai/providers.js';
 
@@ -3713,14 +3714,14 @@ export async function runDreamPipeline(
   // Runs AFTER all data tasks complete. Takes ALL outputs and REASONS about them.
   // This is the difference between a librarian and a strategist.
   if (!options.quick) {
-    console.log('  Task 24: Intelligence cycle v2 (full-context Opus reasoning + FOCUS.md)...');
-    const r24 = await runIntelligenceCycleV2(db);
+    console.log('  Task 24: Quinn Agent (tool-using COS, investigates with MCP tools)...');
+    const r24 = await runQuinnAgent(db);
     results.push(r24);
     const r24out = r24.output || {};
     console.log(`    ${r24.status === 'success' ? '✓' : r24.status === 'skipped' ? '○' : '✗'} ${r24.status} (${r24.duration_seconds.toFixed(1)}s)`);
     if (r24.status === 'success') {
-      console.log(`      Hypotheses: ${r24out.hypotheses} | Weak signals: ${r24out.weak_signals} | Contradictions: ${r24out.contradictions}`);
-      console.log(`      Actions: ${r24out.actions} | Projects: ${r24out.projects} | Prompt: ${r24out.prompt_chars} chars`);
+      console.log(`      Actions: ${r24out.actions} | Response: ${r24out.response_length} chars | FOCUS: ${r24out.focus_updated ? 'updated' : 'unchanged'}`);
+      if (r24out.headline) console.log(`      >>> ${r24out.headline}`);
     }
   }
 
