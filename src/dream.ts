@@ -2962,9 +2962,20 @@ async function task21QuestionGenerator(db: Database.Database): Promise<TaskResul
     const investigations = investigationsRaw ? JSON.parse(investigationsRaw) : [];
     const narrative = narrativeRaw ? narrativeRaw.slice(0, 2000) : '';
 
+    // Auto-expire questions older than 3 days — prevents infinite accumulation
+    db.prepare(`UPDATE prime_questions SET status = 'expired' WHERE status = 'pending' AND created_at < datetime('now', '-3 days')`).run();
+
+    // Delete meta-questions (Quinn complaining about the queue itself)
+    db.prepare(`DELETE FROM prime_questions WHERE question LIKE '%pending question%' OR question LIKE '%question queue%' OR question LIKE '%question-and-answer model%'`).run();
+
     // Check for existing pending questions to avoid duplicates
     const existingQs = db.prepare("SELECT question FROM prime_questions WHERE status = 'pending'").all() as any[];
     const existingSet = new Set(existingQs.map((q: any) => (q.question || '').toLowerCase().slice(0, 50)));
+
+    // If already at 10+ pending, skip generation entirely — user hasn't engaged with questions
+    if (existingQs.length >= 10) {
+      return { task: '21-question-generator', status: 'skipped', duration_seconds: (Date.now() - start) / 1000, output: { reason: `${existingQs.length} pending — skipping until answered` } };
+    }
 
     const prompt = `You are the AI Chief of Staff analyzing dream pipeline outputs. Your job: identify 3-5 questions that ONLY Zach (the founder) can answer. These are things the data cannot resolve.
 
