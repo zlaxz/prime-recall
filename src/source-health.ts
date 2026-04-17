@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { execSync } from 'child_process';
+import { statSync } from 'fs';
 
 /**
  * Source Health Monitor — checks ALL ingestion sources for staleness.
@@ -52,7 +53,6 @@ const INFRA_CHECKS: InfraCheck[] = [
     name: 'FOCUS.md freshness',
     check: () => {
       try {
-        const { statSync } = require('fs');
         const stat = statSync(process.env.HOME + '/.prime/FOCUS.md');
         const ageH = (Date.now() - stat.mtimeMs) / 3600000;
         return ageH > 8 ? `FOCUS.md is ${Math.round(ageH)}h stale — Quinn may not be running` : null;
