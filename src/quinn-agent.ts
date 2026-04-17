@@ -157,8 +157,9 @@ export async function runQuinnAgent(db: Database.Database): Promise<QuinnResult>
     // Run as persistent session with unlimited turns
     const { runClaude } = await import('./utils/claude-spawn.js');
     const response = await runClaude(prompt, {
+      model: 'claude-opus-4-7', // Strategic reasoning — best model available
       sessionId: QUINN_SESSION_ID,
-      maxTurns: 200, // Let Quinn investigate as much as she needs — she's a COS, not a pipeline
+      maxTurns: 200,
       timeout: 900000, // 15 minutes
     });
 

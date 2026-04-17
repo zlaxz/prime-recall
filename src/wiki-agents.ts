@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { v4 as uuid } from 'uuid';
-import { request as httpRequest } from 'http';
+// http.request removed — all proxy calls via curl now
 
 // ============================================================
 // Wiki Agents — Per-project/entity research agents that maintain
@@ -15,39 +15,38 @@ import { request as httpRequest } from 'http';
 //   6. Prime COS reads wiki pages instead of raw KB
 // ============================================================
 
-// Call the proxy /claude endpoint with MCP tools
-// DeepSeek agents: 64K context. ~50 tool calls before context overflow.
-// Each tool result is ~1-2K chars. 50 turns lets the agent crawl broadly.
+// Call Claude via proxy for wiki compilation.
+// Uses Sonnet 4.6 (1M context) — good enough for compilation, saves Opus allocation for strategic work.
+// All calls via curl (http.request doesn't wait for tool sessions).
 async function callAgent(prompt: string, maxTurns: number = 50, timeoutSec: number = 600): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      prompt,
-      timeout: timeoutSec,
-      args: ['--max-turns', String(maxTurns)],
-    });
-    const req = httpRequest('http://localhost:3211/claude', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: (timeoutSec + 30) * 1000,
-    }, (res) => {
-      let data = '';
-      res.on('data', (d: Buffer) => { data += d.toString(); });
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          try {
-            const parsed = JSON.parse(data);
-            resolve(parsed.result || '');
-          } catch { resolve(data); }
-        } else {
-          reject(new Error('Agent proxy returned ' + res.statusCode));
-        }
-      });
-    });
-    req.on('error', (err) => reject(err));
-    req.on('timeout', () => { req.destroy(); reject(new Error('Agent timeout')); });
-    req.write(body);
-    req.end();
+  const { writeFileSync } = await import('fs');
+  const { promisify } = await import('util');
+  const { execFile } = await import('child_process');
+  const execFileAsync = promisify(execFile);
+
+  const body = JSON.stringify({
+    prompt,
+    timeout: timeoutSec,
+    args: ['--model', 'claude-sonnet-4-6', '--max-turns', String(maxTurns)],
   });
+  const tmpPath = `/tmp/wiki-agent-${Date.now()}.json`;
+
+  try {
+    writeFileSync(tmpPath, body);
+    const { stdout } = await execFileAsync('/usr/bin/curl', [
+      '-s', '-X', 'POST',
+      'http://127.0.0.1:3211/claude',
+      '-H', 'Content-Type: application/json',
+      '-d', `@${tmpPath}`,
+      '--max-time', String(timeoutSec + 30),
+    ], { timeout: (timeoutSec + 60) * 1000, maxBuffer: 10 * 1024 * 1024 });
+
+    const parsed = JSON.parse(stdout);
+    if (parsed.error) throw new Error(`Proxy error: ${parsed.error}`);
+    return parsed.result || '';
+  } finally {
+    try { const { unlinkSync } = await import('fs'); unlinkSync(tmpPath); } catch {}
+  }
 }
 
 // Compile a wiki page for a PROJECT

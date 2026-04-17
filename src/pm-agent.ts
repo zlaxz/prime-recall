@@ -60,8 +60,8 @@ async function callProxy(prompt: string, maxTurns: number, timeoutSec: number, s
   const execFileAsync = promisify(execFile);
 
   const args = sessionId
-    ? ['--resume', sessionId, '--max-turns', String(maxTurns)]
-    : ['--max-turns', String(maxTurns)];
+    ? ['--model', 'claude-opus-4-7', '--resume', sessionId, '--max-turns', String(maxTurns)]
+    : ['--model', 'claude-opus-4-7', '--max-turns', String(maxTurns)];
 
   const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
   const tmpPath = `/tmp/pm-proxy-${Date.now()}.json`;
