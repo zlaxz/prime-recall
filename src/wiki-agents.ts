@@ -99,8 +99,8 @@ export async function compileProjectPage(db: Database.Database, projectName: str
     '[1-3 bullet points: the things that matter for Zach\'s decisions]',
     '',
     'RULES:',
-    '- CITE SOURCES with source_ref IDs: "(thread:abc123, April 2)" so Prime can retrieve the full source if needed',
-    '- When you call prime_retrieve, note the thread ID in your citations',
+    '- MANDATORY: Every factual claim MUST end with a citation in format [thread:ID] or [source_ref]. Example: "Forrest confirmed the rates are ready [thread:19d729ca04c7a103]." A page without citations is REJECTED.',
+    '- When you call prime_retrieve, copy the source_ref ID and use it as your citation',
     '- ONLY state facts you verified by reading source material via prime_retrieve',
     '- If you did not read the actual email/document, do NOT claim to know what it says',
     '- Include day-of-week for ALL dates',
@@ -175,7 +175,10 @@ export async function compileEntityPage(db: Database.Database, entityName: strin
     '## Open Items',
     '[What this person owes Zach, what Zach owes them, pending decisions]',
     '',
-    'RULES: CITE SOURCES with source_ref IDs. Same as project page — only verified facts, cite sources, day-of-week on dates.',
+    'RULES:',
+    '- MANDATORY: Every factual claim MUST end with [thread:ID] or [source_ref] citation. A page without citations is REJECTED.',
+    '- Copy the source_ref from prime_retrieve results and use it as citation.',
+    '- Only state facts you verified by reading actual source. Include day-of-week on all dates.',
     correctionText,
   ].join('\n');
 
@@ -189,10 +192,16 @@ export async function compileEntityPage(db: Database.Database, entityName: strin
     if (hashIdx >= 0) page = page.slice(hashIdx + 1);
   }
 
+  // Use slugified name as subject_id for readability (not opaque UUID)
+  const slugId = (entityName || entityId).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+  // Clean up old UUID-based page if it exists
+  db.prepare(`DELETE FROM compiled_pages WHERE page_type = 'entity' AND subject_id = ?`).run(entityId);
+
   db.prepare(`
     INSERT OR REPLACE INTO compiled_pages (id, page_type, subject_id, subject_name, content, version, last_source_date, compiled_at, stale)
     VALUES (?, 'entity', ?, ?, ?, COALESCE((SELECT version + 1 FROM compiled_pages WHERE page_type = 'entity' AND subject_id = ?), 1), datetime('now'), datetime('now'), 0)
-  `).run(uuid(), entityId, entityName, page, entityId);
+  `).run(uuid(), slugId, entityName, page, slugId);
 
   return page;
 }
