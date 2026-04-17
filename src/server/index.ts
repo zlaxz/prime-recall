@@ -779,27 +779,29 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
         }
       } catch { /* non-critical */ }
 
-      const { request: httpReq } = await import('http');
-      const body = JSON.stringify({ message, session_id: session_id || '', timeout: 120 });
+      // Use curl for proxy calls — http.request doesn't wait for multi-turn tool sessions
+      const { writeFileSync, unlinkSync } = await import('fs');
+      const { promisify } = await import('util');
+      const { execFile } = await import('child_process');
+      const execFileAsync = promisify(execFile);
 
-      const result = await new Promise<any>((resolve, reject) => {
-        const cosReq = httpReq('http://localhost:3211/prime', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-          timeout: 130000,
-        }, (cosRes) => {
-          let data = '';
-          cosRes.on('data', (d: Buffer) => { data += d.toString(); });
-          cosRes.on('end', () => {
-            try { resolve(JSON.parse(data)); }
-            catch { resolve({ content: data, session_id: '' }); }
-          });
-        });
-        cosReq.on('error', reject);
-        cosReq.on('timeout', () => { cosReq.destroy(); reject(new Error('COS proxy timeout')); });
-        cosReq.write(body);
-        cosReq.end();
-      });
+      const body = JSON.stringify({ message, session_id: session_id || '', timeout: 120 });
+      const tmpPath = `/tmp/prime-chat-${Date.now()}.json`;
+
+      let result: any;
+      try {
+        writeFileSync(tmpPath, body);
+        const { stdout } = await execFileAsync('/usr/bin/curl', [
+          '-s', '-X', 'POST', 'http://127.0.0.1:3211/prime',
+          '-H', 'Content-Type: application/json',
+          '-d', `@${tmpPath}`,
+          '--max-time', '150',
+        ], { timeout: 180000, maxBuffer: 10 * 1024 * 1024 });
+        try { result = JSON.parse(stdout); }
+        catch { result = { content: stdout, session_id: '' }; }
+      } finally {
+        try { unlinkSync(tmpPath); } catch {}
+      }
 
       // Store Quinn's response in KB for agent access
       try {
