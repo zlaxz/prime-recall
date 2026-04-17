@@ -132,6 +132,10 @@ export async function runClaude(prompt: string, options: {
  * Call claude via the localhost:3211 GUI proxy.
  * The proxy is a headless macOS app with Keychain access.
  */
+// All proxy calls go through curl. http.request has two unfixable issues:
+// 1. Doesn't wait for multi-turn tool sessions (returns before tools execute)
+// 2. Body reading issues with the Swift proxy for large payloads
+// Curl handles both correctly. One code path. Always works.
 async function runClaudeViaProxy(prompt: string, options: {
   sessionId?: string;
   maxTurns?: number;
@@ -144,42 +148,7 @@ async function runClaudeViaProxy(prompt: string, options: {
   const timeoutSec = Math.round((options.timeout || 120000) / 1000);
   const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
 
-  // The Swift proxy has a ~64KB body read buffer for http.request,
-  // AND http.request doesn't properly wait for multi-turn tool sessions.
-  // Use curl for: large payloads (>60KB) OR multi-turn sessions (maxTurns > 1).
-  // Curl handles both correctly.
-  if (Buffer.byteLength(body) > 60000 || (options.maxTurns && options.maxTurns > 1)) {
-    return runClaudeViaProxyCurl(body, timeoutSec);
-  }
-
-  const { request: httpRequest } = await import('http');
-  return new Promise((resolve, reject) => {
-    const req = httpRequest({
-      hostname: '127.0.0.1',
-      port: 3211,
-      path: '/claude',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: (timeoutSec + 30) * 1000,
-    }, (res) => {
-      let data = '';
-      res.on('data', (d: Buffer) => { data += d.toString(); });
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          try {
-            const parsed = JSON.parse(data);
-            resolve(parsed.result || data);
-          } catch { resolve(data); }
-        } else {
-          reject(new Error(`Proxy returned ${res.statusCode}: ${data.slice(0, 200)}`));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Proxy timeout')); });
-    req.write(body);
-    req.end();
-  });
+  return runClaudeViaProxyCurl(body, timeoutSec);
 }
 
 /**

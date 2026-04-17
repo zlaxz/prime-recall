@@ -64,11 +64,36 @@ class HTTPServer {
     }
 
     func handleClient(_ fd: Int32) {
-        var buf = [UInt8](repeating: 0, count: 1_000_000)
-        let n = read(fd, &buf, buf.count)
-        guard n > 0 else { close(fd); return }
+        // Read the full HTTP request — loop until we have all the content.
+        // A single read() misses data sent in multiple TCP packets,
+        // which is why http.request failed for bodies >64KB.
+        var allData = Data()
+        var buf = [UInt8](repeating: 0, count: 65536)
 
-        let raw = String(bytes: buf[..<n], encoding: .utf8) ?? ""
+        // First read to get headers
+        let firstRead = read(fd, &buf, buf.count)
+        guard firstRead > 0 else { close(fd); return }
+        allData.append(contentsOf: buf[..<firstRead])
+
+        // Check Content-Length and keep reading until we have the full body
+        if let headerStr = String(data: allData, encoding: .utf8),
+           let clRange = headerStr.range(of: "Content-Length: ", options: .caseInsensitive),
+           let endRange = headerStr[clRange.upperBound...].range(of: "\r\n") {
+            let clStr = String(headerStr[clRange.upperBound..<endRange.lowerBound])
+            if let contentLength = Int(clStr),
+               let headerEnd = headerStr.range(of: "\r\n\r\n") {
+                let headerSize = headerStr.distance(from: headerStr.startIndex, to: headerEnd.upperBound)
+                let totalNeeded = headerSize + contentLength
+
+                while allData.count < totalNeeded {
+                    let n = read(fd, &buf, min(buf.count, totalNeeded - allData.count))
+                    if n <= 0 { break }
+                    allData.append(contentsOf: buf[..<n])
+                }
+            }
+        }
+
+        let raw = String(data: allData, encoding: .utf8) ?? ""
 
         // Parse HTTP request — extract body after \r\n\r\n
         guard let bodyStart = raw.range(of: "\r\n\r\n") else {
