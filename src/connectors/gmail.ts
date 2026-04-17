@@ -786,39 +786,18 @@ export async function sendEmail(
     bcc?: string;
     replyToThreadId?: string;  // reply to existing thread
     html?: boolean;
+    from?: string;  // default: quinn@recaptureinsurance.com
   }
 ): Promise<{ success: boolean; messageId?: string; threadId?: string; error?: string }> {
-  const tokens = getConfig(db, 'gmail_tokens');
-  if (!tokens) return { success: false, error: 'Gmail not connected' };
-
-  const clientId = CLIENT_ID || getConfig(db, 'google_client_id') || '';
-  const clientSecret = CLIENT_SECRET || getConfig(db, 'google_client_secret') || '';
-  if (!clientId || !clientSecret) return { success: false, error: 'Google OAuth credentials missing' };
-
-  // Check if we have send scope
-  const scope = tokens.scope || '';
-  if (!scope.includes('gmail.send')) {
-    return { success: false, error: 'Gmail send scope not authorized. Run: recall connect gmail (approve send permission)' };
+  // Use service account for sending (domain-wide delegation with gmail.send scope)
+  const fromEmail = options.from || 'quinn@recaptureinsurance.com';
+  const saAuth = getServiceAccountAuth(fromEmail, ['https://www.googleapis.com/auth/gmail.send']);
+  if (!saAuth) {
+    return { success: false, error: 'Service account not configured for gmail.send' };
   }
 
-  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI);
-  oauth2Client.setCredentials(tokens);
-
-  // Refresh token
-  oauth2Client.on('tokens', (newTokens) => {
-    const current = getConfig(db, 'gmail_tokens');
-    setConfig(db, 'gmail_tokens', { ...current, ...newTokens });
-  });
-  try {
-    const { credentials } = await oauth2Client.refreshAccessToken();
-    oauth2Client.setCredentials(credentials);
-    setConfig(db, 'gmail_tokens', credentials);
-  } catch (err: any) {
-    return { success: false, error: `Token refresh failed: ${err.message}` };
-  }
-
-  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-  const userEmail = getConfig(db, 'gmail_email') || '';
+  const gmail = google.gmail({ version: 'v1', auth: saAuth });
+  const userEmail = fromEmail;
 
   // Build RFC 2822 message
   const contentType = options.html ? 'text/html' : 'text/plain';
