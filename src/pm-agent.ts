@@ -55,6 +55,60 @@ function writeAgentFile(agentId: string, filename: string, content: string) {
   writeFileSync(join(dir, filename), content, 'utf-8');
 }
 
+const MAX_MEMORY_CYCLES = 10;
+
+/**
+ * Cap MEMORY.md to the last N cycle entries.
+ * Older entries are collapsed into a single "Historical Context" summary.
+ * Each cycle entry starts with "## Cycle ".
+ */
+function capMemory(memoryContent: string): string {
+  if (!memoryContent) return memoryContent;
+
+  // Split on cycle headers
+  const parts = memoryContent.split(/(?=^## Cycle )/m);
+  // Filter out empty parts, but preserve any leading non-cycle content (e.g., historical summary)
+  const historicalParts: string[] = [];
+  const cycleParts: string[] = [];
+
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('## Cycle ')) {
+      cycleParts.push(trimmed);
+    } else {
+      historicalParts.push(trimmed);
+    }
+  }
+
+  if (cycleParts.length <= MAX_MEMORY_CYCLES) {
+    return memoryContent; // Under cap, no changes needed
+  }
+
+  // Keep last N cycles, summarize the rest
+  const toSummarize = cycleParts.slice(0, cycleParts.length - MAX_MEMORY_CYCLES);
+  const toKeep = cycleParts.slice(cycleParts.length - MAX_MEMORY_CYCLES);
+
+  // Extract key facts from old cycles (take first line of each as a summary bullet)
+  const summaryBullets = toSummarize.map(cycle => {
+    const lines = cycle.split('\n').filter(l => l.trim());
+    const header = lines[0] || '';
+    // Take the first substantive line after the header
+    const firstFact = lines.slice(1).find(l => l.trim().length > 10) || '';
+    const dateMatch = header.match(/## Cycle (.+)/);
+    const date = dateMatch ? dateMatch[1] : 'unknown date';
+    return `- ${date}: ${firstFact.trim().slice(0, 200)}`;
+  });
+
+  const historicalBlock = [
+    '## Historical Context (summarized from older cycles)',
+    ...summaryBullets,
+    '',
+  ].join('\n');
+
+  return [historicalBlock, ...toKeep].join('\n\n');
+}
+
 // Call the proxy to run Opus with MCP tools.
 // MUST use curl — http.request returns early before multi-turn tool calls complete.
 async function callProxy(prompt: string, maxTurns: number, timeoutSec: number): Promise<{ result: string; sessionId: string }> {
@@ -167,13 +221,14 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   // Save wiki page
   writeAgentFile(config.agentId, 'wiki-page.md', wikiPage);
 
-  // Append to MEMORY.md (don't replace — accumulate)
+  // Append to MEMORY.md (don't replace — accumulate, but cap at MAX_MEMORY_CYCLES)
   if (memoryUpdate) {
     const existingMemory = readFile(join(dir, 'MEMORY.md'));
-    const newMemory = existingMemory
+    const appended = existingMemory
       ? existingMemory + '\n\n## Cycle ' + dateStr + '\n' + memoryUpdate
       : '## Cycle ' + dateStr + '\n' + memoryUpdate;
-    writeAgentFile(config.agentId, 'MEMORY.md', newMemory);
+    const capped = capMemory(appended);
+    writeAgentFile(config.agentId, 'MEMORY.md', capped);
   }
 
   // Replace CONCERNS.md (current watchlist, not historical)

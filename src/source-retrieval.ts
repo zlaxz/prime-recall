@@ -65,12 +65,15 @@ async function getGmailClientForAccount(db: Database.Database, email: string) {
   }
 }
 
-// Smart Gmail client — picks the right auth based on source_account
+// Smart Gmail client — ALWAYS use service account when available.
+// The OAuth token is for quinn@ and can't access Zach's or Forrest's threads.
 async function getSmartGmailClient(db: Database.Database, sourceAccount?: string) {
-  if (sourceAccount && sourceAccount !== 'zach.stock@recaptureinsurance.com') {
-    const saClient = await getGmailClientForAccount(db, sourceAccount);
-    if (saClient) return saClient;
-  }
+  // Try service account first for ANY account (including Zach's)
+  const account = sourceAccount || 'zach.stock@recaptureinsurance.com';
+  const saClient = await getGmailClientForAccount(db, account);
+  if (saClient) return saClient;
+
+  // Fallback to OAuth only if service account unavailable
   return getGmailClient(db);
 }
 
