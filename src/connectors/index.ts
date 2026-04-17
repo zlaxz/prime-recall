@@ -117,6 +117,17 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
     } catch (_e) {}
   }
 
+  // Claude Code sessions (from laptop-sources sync)
+  try {
+    const { scanClaudeCode } = await import('./claude-code.js');
+    const ccResult = await scanClaudeCode(db, { days: 30, maxSessions: 100 });
+    if (ccResult.items > 0) results.push({ source: 'claude-code', items: ccResult.items });
+  } catch (err: any) {
+    if (!err.message?.includes('Cannot find')) {
+      results.push({ source: 'claude-code', items: 0, error: err.message?.slice(0, 80) });
+    }
+  }
+
   // Gmail Sent — corrects false awaiting_reply tags + captures Zach-initiated threads
   if (gmailTokens) {
     try {

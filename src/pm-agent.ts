@@ -6,18 +6,21 @@ import { homedir } from 'os';
 import { v4 as uuid } from 'uuid';
 
 // ============================================================
-// PM Agent — Opus-powered Project Manager with persistent session
+// PM Agent — Opus-powered Project Manager (fresh session each cycle)
 //
 // Each PM has:
 //   - SOUL.md (identity — who am I, what do I do)
 //   - MEMORY.md (curated long-term memory — survives session resets)
 //   - CONCERNS.md (watchlist — what am I tracking)
-//   - Persistent --resume session (accumulates across cycles)
 //   - Wiki page (output — updated each cycle)
 //
-// The PM uses MCP tools via the proxy to investigate.
-// It reads actual emails, searches the KB, checks commitments.
-// It then updates its wiki page with PM-level insights.
+// NO --resume: each cycle is a fresh session. Institutional memory
+// is preserved through MEMORY.md, CONCERNS.md, and the last wiki
+// page — all loaded into the prompt. This avoids session context
+// accumulation that pushes past the proxy body limit (~128KB).
+//
+// MEMORY.md is capped at 10 most recent cycle entries. Older
+// entries are summarized into a single "historical context" block.
 // ============================================================
 
 const AGENT_DIR = join(homedir(), '.prime', 'agents');
@@ -52,16 +55,69 @@ function writeAgentFile(agentId: string, filename: string, content: string) {
   writeFileSync(join(dir, filename), content, 'utf-8');
 }
 
+const MAX_MEMORY_CYCLES = 10;
+
+/**
+ * Cap MEMORY.md to the last N cycle entries.
+ * Older entries are collapsed into a single "Historical Context" summary.
+ * Each cycle entry starts with "## Cycle ".
+ */
+function capMemory(memoryContent: string): string {
+  if (!memoryContent) return memoryContent;
+
+  // Split on cycle headers
+  const parts = memoryContent.split(/(?=^## Cycle )/m);
+  // Filter out empty parts, but preserve any leading non-cycle content (e.g., historical summary)
+  const historicalParts: string[] = [];
+  const cycleParts: string[] = [];
+
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('## Cycle ')) {
+      cycleParts.push(trimmed);
+    } else {
+      historicalParts.push(trimmed);
+    }
+  }
+
+  if (cycleParts.length <= MAX_MEMORY_CYCLES) {
+    return memoryContent; // Under cap, no changes needed
+  }
+
+  // Keep last N cycles, summarize the rest
+  const toSummarize = cycleParts.slice(0, cycleParts.length - MAX_MEMORY_CYCLES);
+  const toKeep = cycleParts.slice(cycleParts.length - MAX_MEMORY_CYCLES);
+
+  // Extract key facts from old cycles (take first line of each as a summary bullet)
+  const summaryBullets = toSummarize.map(cycle => {
+    const lines = cycle.split('\n').filter(l => l.trim());
+    const header = lines[0] || '';
+    // Take the first substantive line after the header
+    const firstFact = lines.slice(1).find(l => l.trim().length > 10) || '';
+    const dateMatch = header.match(/## Cycle (.+)/);
+    const date = dateMatch ? dateMatch[1] : 'unknown date';
+    return `- ${date}: ${firstFact.trim().slice(0, 200)}`;
+  });
+
+  const historicalBlock = [
+    '## Historical Context (summarized from older cycles)',
+    ...summaryBullets,
+    '',
+  ].join('\n');
+
+  return [historicalBlock, ...toKeep].join('\n\n');
+}
+
 // Call the proxy to run Opus with MCP tools.
 // MUST use curl — http.request returns early before multi-turn tool calls complete.
-async function callProxy(prompt: string, maxTurns: number, timeoutSec: number, sessionId?: string): Promise<{ result: string; sessionId: string }> {
+async function callProxy(prompt: string, maxTurns: number, timeoutSec: number): Promise<{ result: string; sessionId: string }> {
   const { promisify } = await import('util');
   const { execFile } = await import('child_process');
   const execFileAsync = promisify(execFile);
 
-  const args = sessionId
-    ? ['--model', 'claude-opus-4-7', '--resume', sessionId, '--max-turns', String(maxTurns)]
-    : ['--model', 'claude-opus-4-7', '--max-turns', String(maxTurns)];
+  // Always fresh session — no --resume. Persistent memory lives in files, not session context.
+  const args = ['--model', 'claude-opus-4-7', '--max-turns', String(maxTurns)];
 
   const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
   const tmpPath = `/tmp/pm-proxy-${Date.now()}.json`;
@@ -95,12 +151,6 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   const memory = readFile(join(dir, 'MEMORY.md'));
   const concerns = readFile(join(dir, 'CONCERNS.md'));
   const lastWikiPage = readFile(join(dir, 'wiki-page.md'));
-
-  // Get existing session ID for --resume
-  const agentState = db.prepare(
-    'SELECT session_id FROM agent_state WHERE agent_type = ? AND subject_id = ?'
-  ).get('pm', config.project) as any;
-  const sessionId = agentState?.session_id || undefined;
 
   // Build the PM prompt
   const now = new Date();
@@ -138,9 +188,9 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     '(What you\'re watching for next cycle. Replace the full list — keep it current.)',
   ].filter(Boolean).join('\n');
 
-  // Call Opus via proxy with --resume
-  console.log(`    PM ${config.agentId}: calling Opus${sessionId ? ' (resuming session)' : ' (new session)'}...`);
-  const response = await callProxy(prompt, maxTurns, timeoutSec, sessionId);
+  // Call Opus via proxy — fresh session each cycle
+  console.log(`    PM ${config.agentId}: calling Opus (fresh session)...`);
+  const response = await callProxy(prompt, maxTurns, timeoutSec);
 
   // Parse the three outputs
   const content = response.result;
@@ -171,13 +221,14 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   // Save wiki page
   writeAgentFile(config.agentId, 'wiki-page.md', wikiPage);
 
-  // Append to MEMORY.md (don't replace — accumulate)
+  // Append to MEMORY.md (don't replace — accumulate, but cap at MAX_MEMORY_CYCLES)
   if (memoryUpdate) {
     const existingMemory = readFile(join(dir, 'MEMORY.md'));
-    const newMemory = existingMemory
+    const appended = existingMemory
       ? existingMemory + '\n\n## Cycle ' + dateStr + '\n' + memoryUpdate
       : '## Cycle ' + dateStr + '\n' + memoryUpdate;
-    writeAgentFile(config.agentId, 'MEMORY.md', newMemory);
+    const capped = capMemory(appended);
+    writeAgentFile(config.agentId, 'MEMORY.md', capped);
   }
 
   // Replace CONCERNS.md (current watchlist, not historical)
@@ -199,17 +250,16 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
       datetime('now'), datetime('now'), 0)
   `).run(uuid(), config.project, config.project, wikiPage, config.project);
 
-  // Store session ID + update agent_state
+  // Update agent_state (no session_id — each cycle is fresh)
   db.prepare(`
     INSERT OR REPLACE INTO agent_state (agent_type, subject_id, soul, memory, concerns, last_wiki_page, session_id, last_run_at)
-    VALUES ('pm', ?, ?, ?, ?, ?, ?, datetime('now'))
+    VALUES ('pm', ?, ?, ?, ?, ?, '', datetime('now'))
   `).run(
     config.project,
     soul,
     readFile(join(dir, 'MEMORY.md')),
     concernsUpdate || concerns,
     wikiPage.slice(0, 5000),
-    response.sessionId || sessionId || '',
   );
 
   console.log(`    PM ${config.agentId}: done in ${((Date.now() - start) / 1000).toFixed(1)}s`);
@@ -219,6 +269,6 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     memoryUpdate,
     concernsUpdate,
     durationMs: Date.now() - start,
-    sessionId: response.sessionId || sessionId || '',
+    sessionId: '', // Fresh session each cycle — no persistence
   };
 }
