@@ -290,6 +290,86 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     res.json({ commitments });
   });
 
+  // Structured commitments view — from the commitments table, not JSON arrays.
+  // Returns grouped, sorted commitments with full state tracking.
+  app.get('/api/commitments', (_req, res) => {
+    try {
+      const rows = db.prepare(\`
+        SELECT id, text, owner, assigned_to, due_date, project, state, context,
+               detected_from, detected_at, state_changed_at, importance, fulfilled_evidence
+        FROM commitments
+        WHERE state NOT IN ('abandoned', 'dropped')
+        ORDER BY
+          CASE state
+            WHEN 'overdue' THEN 1
+            WHEN 'active' THEN 2
+            WHEN 'pending' THEN 3
+            WHEN 'detected' THEN 4
+            WHEN 'fulfilled' THEN 5
+            WHEN 'done' THEN 6
+            ELSE 7
+          END,
+          due_date IS NULL, due_date ASC,
+          detected_at DESC
+        LIMIT 200
+      \`).all() as any[];
+
+      // Classify ownership — is this Zach's commitment or someone else's?
+      const userTerms = ['zach', 'me', 'i', 'i\'ll', 'i\'m', 'i will'];
+      const isUserCommitment = (c: any): boolean => {
+        const owner = (c.owner || '').toLowerCase();
+        const text = (c.text || '').toLowerCase();
+        if (userTerms.some(t => owner.includes(t))) return true;
+        if (/^(i\s|i\'|me\s|my\s)/i.test(c.text || '')) return true;
+        return false;
+      };
+
+      const youOwe = rows.filter(isUserCommitment);
+      const theyOwe = rows.filter((r: any) => !isUserCommitment(r));
+
+      // Group each bucket by state
+      const groupByState = (items: any[]) => ({
+        overdue: items.filter(i => i.state === 'overdue'),
+        active: items.filter(i => i.state === 'active'),
+        pending: items.filter(i => i.state === 'pending'),
+        detected: items.filter(i => i.state === 'detected'),
+        fulfilled: items.filter(i => i.state === 'fulfilled' || i.state === 'done'),
+      });
+
+      res.json({
+        total: rows.length,
+        you_owe: {
+          total: youOwe.length,
+          by_state: groupByState(youOwe),
+        },
+        they_owe: {
+          total: theyOwe.length,
+          by_state: groupByState(theyOwe),
+        },
+        last_extracted: (db.prepare("SELECT MAX(detected_at) as t FROM commitments").get() as any)?.t,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Update commitment state (manual override from UI — user marks as done/dropped)
+  app.post('/api/commitments/:id/state', (req, res) => {
+    try {
+      const { state, evidence } = req.body;
+      const validStates = ['detected', 'active', 'pending', 'overdue', 'fulfilled', 'done', 'dropped', 'abandoned'];
+      if (!validStates.includes(state)) {
+        res.status(400).json({ error: 'invalid state' });
+        return;
+      }
+      db.prepare("UPDATE commitments SET state = ?, state_changed_at = datetime('now'), fulfilled_evidence = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(state, evidence || null, req.params.id);
+      res.json({ ok: true, id: req.params.id, state });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/api/query/projects', (_req, res) => {
     const results = searchByText(db, '', 1000);
     const _dRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'dismissed_projects'").get() as any)?.value;
