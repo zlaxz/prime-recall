@@ -7,7 +7,7 @@ import { getBulkProvider } from './providers.js';
  * Simple string similarity (Dice coefficient) for deduplication.
  */
 function similarity(a: string, b: string): number {
-  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+  const normalize = (s: any) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
   const na = normalize(a);
   const nb = normalize(b);
   if (na === nb) return 1;
@@ -42,7 +42,7 @@ export async function extractCommitments(
 
   const items = getAllKnowledge(db);
   const existingCommitments = getCommitments(db);
-  const existingTexts = existingCommitments.map((c: any) => c.text as string);
+  const existingTexts = existingCommitments.map((c: any) => c.text).filter((t: any) => typeof t === 'string' && t.length > 0);
 
   let extracted = 0;
   let skipped = 0;
@@ -66,7 +66,9 @@ export async function extractCommitments(
 
   // Batch process commitments through Claude for enrichment
   for (const { item, commitmentTexts } of itemsWithCommitments) {
-    for (const text of commitmentTexts) {
+    for (const rawText of commitmentTexts) {
+      const text = typeof rawText === 'string' ? rawText : (rawText?.text || String(rawText || ''));
+      if (!text || text.length < 3) { skipped++; continue; }
       // Dedup check: skip if very similar to an existing commitment
       const isDuplicate = existingTexts.some(existing => similarity(existing, text) > 0.85);
       if (isDuplicate) {
