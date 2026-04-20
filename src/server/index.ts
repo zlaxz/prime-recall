@@ -292,13 +292,19 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
 
   // Structured commitments view — from the commitments table, not JSON arrays.
   // Returns grouped, sorted commitments with full state tracking.
-  app.get('/api/commitments', (_req, res) => {
+  // Filters by source date (when the commitment was actually made) — default 60 days.
+  app.get('/api/commitments', (req, res) => {
     try {
+      const days = Math.max(1, Math.min(365, parseInt(String(req.query.days || '60')) || 60));
+      const cutoff = new Date(Date.now() - days * 86400000).toISOString();
       const rows = db.prepare(`
-        SELECT id, text, owner, assigned_to, due_date, project, state, context,
-               detected_from, detected_at, state_changed_at, importance, fulfilled_evidence
-        FROM commitments
-        WHERE state NOT IN ('abandoned', 'dropped')
+        SELECT c.id, c.text, c.owner, c.assigned_to, c.due_date, c.project, c.state, c.context,
+               c.detected_from, c.detected_at, c.state_changed_at, c.importance, c.fulfilled_evidence,
+               k.source_date, k.source as source_type, k.title as source_title
+        FROM commitments c
+        LEFT JOIN knowledge k ON k.id = c.detected_from
+        WHERE c.state NOT IN ('abandoned', 'dropped')
+          AND (k.source_date IS NULL OR k.source_date > ?)
         ORDER BY
           CASE state
             WHEN 'overdue' THEN 1
@@ -310,9 +316,9 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
             ELSE 7
           END,
           due_date IS NULL, due_date ASC,
-          detected_at DESC
+          c.detected_at DESC
         LIMIT 200
-      `).all() as any[];
+      `).all(cutoff) as any[];
 
       // Classify ownership — is this Zach's commitment or someone else's?
       const userTerms = ['zach', 'me', 'i', 'i\'ll', 'i\'m', 'i will'];
@@ -338,6 +344,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
 
       res.json({
         total: rows.length,
+        window_days: days,
+        cutoff,
         you_owe: {
           total: youOwe.length,
           by_state: groupByState(youOwe),
@@ -346,7 +354,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
           total: theyOwe.length,
           by_state: groupByState(theyOwe),
         },
-        last_extracted: (db.prepare("SELECT MAX(detected_at) as t FROM commitments").get() as any)?.t,
+        last_extracted: (db.prepare("SELECT MAX(created_at) as t FROM commitments").get() as any)?.t,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
