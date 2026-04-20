@@ -97,6 +97,19 @@ async function tick() {
   const lastFull = lastFullRaw ? new Date(JSON.parse(lastFullRaw)).getTime() : 0;
 
   if (Date.now() - lastFull > 4 * HOUR_MS) {
+    // Promote commitments from knowledge.commitments JSON arrays into the structured
+    // commitments table. Without this, commitment tracking is frozen to whenever
+    // someone last ran \`recall refine\` manually.
+    console.log('[shift]   Extracting commitments (JSON arrays -> structured rows)...');
+    try {
+      const { extractCommitments, updateCommitmentStates } = await import('./ai/commitments.js');
+      const extractResult = await extractCommitments(db, { verbose: false });
+      const stateResult = await updateCommitmentStates(db, { verbose: false });
+      console.log('[shift]   Commitments: ' + extractResult.extracted + ' extracted, ' + extractResult.skipped + ' dedup, states: ' + stateResult.newOverdue + ' overdue, ' + stateResult.newFulfilled + ' fulfilled, ' + stateResult.newDropped + ' dropped');
+    } catch (err: any) {
+      console.log('[shift]   Commitment extraction failed: ' + (err.message || '').slice(0, 80));
+    }
+
     // Run dream pipeline FIRST (entity profiles, project profiles, commitments)
     // Intelligence cycle reads these outputs, so they must be fresh
     console.log('[shift]   Running dream pipeline (project/entity profiles, commitments)...');
