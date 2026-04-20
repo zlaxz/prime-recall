@@ -24,9 +24,11 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
 
   // CORS — restrict to known origins
   const ALLOWED_ORIGINS = [
-    'http://localhost:5173',                    // Local dev
+    'http://localhost:5173',                    // Local dev (Vite default)
     'http://localhost:3000',                    // Local dev alt
+    'http://localhost:8080',                    // Local dev (prime-production)
     'https://prime.recaptureinsurance.com',     // Self (tunnel)
+    'https://prime-command.lovable.app',        // Published Lovable app
   ];
 
   app.use((_req, res, next) => {

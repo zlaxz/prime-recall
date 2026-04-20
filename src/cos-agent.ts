@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { request as httpRequest } from 'http';
+import { getCorrectionRules } from './intelligence-loop.js';
 import { v4 as uuid } from 'uuid';
 
 // ============================================================
@@ -184,8 +185,10 @@ export async function runCOS(db: Database.Database): Promise<COSResult> {
     promptParts.push('');
   }
 
+  const lessonsText = getCorrectionRules(db) || "";
   promptParts.push(
     correctionText, '',
+    lessonsText ? '## ACTIVE LESSONS (from past cycles)\n' + lessonsText : '', '',
     calendarText, '',
     concernsText, '',
     freshText, '',
