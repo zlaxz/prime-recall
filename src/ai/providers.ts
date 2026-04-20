@@ -163,10 +163,30 @@ export async function getDefaultProvider(apiKey?: string): Promise<LLMProvider> 
  *
  * Falls back to Claude if DEEPSEEK_API_KEY not set.
  */
-export async function getBulkProvider(apiKey?: string): Promise<LLMProvider> {
+export async function getBulkProvider(apiKey?: string, db?: any): Promise<LLMProvider> {
   if (_deepseekProvider) return _deepseekProvider;
 
-  const deepseekKey = process.env.DEEPSEEK_API_KEY;
+  // 1. Env var (preferred — set by launchd plist or shell)
+  // 2. .env file in project root (for manual CLI runs)
+  // 3. config table (for legacy manual setup)
+  let deepseekKey = process.env.DEEPSEEK_API_KEY;
+  if (!deepseekKey) {
+    try {
+      const { readFileSync, existsSync } = await import('fs');
+      const envPath = '/Users/zachstock/GitHub/prime/.env';
+      if (existsSync(envPath)) {
+        const envContent = readFileSync(envPath, 'utf-8');
+        const match = envContent.match(/^DEEPSEEK_API_KEY=(.+)$/m);
+        if (match) deepseekKey = match[1].trim().replace(/^['"]|['"]$/g, '');
+      }
+    } catch (_e) {}
+  }
+  if (!deepseekKey && db) {
+    try {
+      const { getConfig } = await import('../db.js');
+      deepseekKey = getConfig(db, 'deepseek_api_key') || undefined;
+    } catch (_e) {}
+  }
   if (deepseekKey) {
     _deepseekProvider = createAPIProvider({
       model: 'deepseek-chat',
