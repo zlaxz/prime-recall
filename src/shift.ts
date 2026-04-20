@@ -150,14 +150,16 @@ async function tick() {
       console.log('[shift]   PM agents failed: ' + (err.message || '').slice(0, 60));
     }
 
-    // NEW: COS agent reads wiki pages and produces brief
-    console.log('[shift]   Running COS agent...');
+    // Quinn Agent — tool-using COS on Opus 4.7
+    // Replaces the old COS agent. Quinn investigates with MCP tools,
+    // challenges her own assumptions, and updates FOCUS.md.
+    console.log('[shift]   Running Quinn agent (Opus 4.7, tool-using COS)...');
     try {
-      const { runCOS } = await import('./cos-agent.js');
-      const cosResult = await runCOS(db);
-      console.log('[shift]   COS: ' + (cosResult.durationMs / 1000).toFixed(0) + 's — ' + (cosResult.headline || '').slice(0, 60));
+      const { runQuinnAgent } = await import('./quinn-agent.js');
+      const quinnResult = await runQuinnAgent(db);
+      console.log('[shift]   Quinn: ' + quinnResult.duration_seconds.toFixed(0) + 's — ' + (quinnResult.output?.headline || '').slice(0, 60));
     } catch (err: any) {
-      console.log('[shift]   COS failed: ' + (err.message || '').slice(0, 60));
+      console.log('[shift]   Quinn failed: ' + (err.message || '').slice(0, 60));
     }
 
     // Daily web research — scours internet for relevant articles (20-hour gate)

@@ -83,6 +83,7 @@ srv.tool(
           let entry = `[${i + 1}] ${r.title}${score}`;
           entry += `\n   ${r.summary}`;
           entry += `\n   Source: ${r.source} | Date: ${dateInfo || 'unknown'}${r.project ? ` | Project: ${r.project}` : ''}`;
+          if (r.source_ref) entry += `\n   Ref: ${r.source_ref}`;
           if (contacts.length) entry += `\n   Contacts: ${contacts.join(', ')}`;
           if (commitments.length) entry += `\n   Commitments: ${commitments.join('; ')}`;
           if (r._via) entry += `\n   Via: ${r._via}`;

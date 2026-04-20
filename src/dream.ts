@@ -3713,17 +3713,9 @@ export async function runDreamPipeline(
   // ── INTELLIGENCE CYCLE — strategic reasoning engine ──────
   // Runs AFTER all data tasks complete. Takes ALL outputs and REASONS about them.
   // This is the difference between a librarian and a strategist.
-  if (!options.quick) {
-    console.log('  Task 24: Quinn Agent (tool-using COS, investigates with MCP tools)...');
-    const r24 = await runQuinnAgent(db);
-    results.push(r24);
-    const r24out = r24.output || {};
-    console.log(`    ${r24.status === 'success' ? '✓' : r24.status === 'skipped' ? '○' : '✗'} ${r24.status} (${r24.duration_seconds.toFixed(1)}s)`);
-    if (r24.status === 'success') {
-      console.log(`      Actions: ${r24out.actions} | Response: ${r24out.response_length} chars | FOCUS: ${r24out.focus_updated ? 'updated' : 'unchanged'}`);
-      if (r24out.headline) console.log(`      >>> ${r24out.headline}`);
-    }
-  }
+  // Task 24: Quinn Agent — MOVED to shift daemon (runs after PMs + wiki compilation)
+  // Quinn runs once per 4-hour cycle in shift.ts, not here.
+  // Keeping this comment so the task numbering is clear.
 
   // ── AUTONOMOUS RESEARCH — the system hunts for what it needs ──
   if (!options.quick) {
