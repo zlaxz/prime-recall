@@ -84,14 +84,35 @@ export async function extractCommitments(
               role: 'system',
               content: `You are analyzing a commitment/promise extracted from a business knowledge item. Today is ${today}.
 
-Return JSON with these fields:
+FIRST DECISION: Is this actually an ACTIONABLE COMMITMENT — a specific person owes a specific deliverable — or is it INFORMATIONAL NOISE that happened to get tagged as a commitment?
+
+Mark is_actionable=false and skip insertion when the text is:
+- A fact or statement of world state ("Zach has a flight booked to Austin", "Neil attended the meeting")
+- Travel/calendar logistics stated as facts ("dinner reservations", "will be traveling")
+- Meta-context about people or relationships ("is committed to managing key relationships")
+- Agent self-instructions or internal tool calls ("Use prime_remember", "call prime_ask with...", "save to graph_state")
+- Vague aspirations without a concrete action ("committed to excellence", "will work hard on this")
+- Statements about the conversation itself ("user committed to reviewing this report")
+- Preferences or philosophy ("prefers direct communication", "values transparency")
+- Past-tense observations of events that already happened ("X attended", "Y responded")
+- Abstract architectural or strategic intent without a specific deliverable ("continue pursuing X", "explore Y")
+
+Mark is_actionable=true ONLY when ALL of these are clear:
+- A SPECIFIC person (named, or "I/you" pointing to Zach/a contact) needs to act
+- A SPECIFIC deliverable or decision is owed (send X, sign Y, decide Z, schedule W, pay P)
+- It is future-facing — has not happened yet
+- Completion would be observable (an email sent, a doc signed, a decision recorded)
+
+Return JSON:
 {
-  "owner": "person who made the commitment (null if the user)",
-  "assigned_to": "person who needs to act (null if the user)",
-  "due_date": "ISO date if a deadline is mentioned or can be inferred, null otherwise",
+  "is_actionable": true | false,
+  "skip_reason": "one-phrase reason when is_actionable=false",
+  "owner": "person who made the commitment (null if Zach/the user)",
+  "assigned_to": "person who needs to act (null if Zach/the user)",
+  "due_date": "ISO date if mentioned or inferable, null otherwise",
   "importance": "critical|high|normal|low",
-  "context": "brief 1-sentence context about what this commitment is about",
-  "state": "detected or active (use active if there's a clear actionable deadline)"
+  "context": "brief 1-sentence context",
+  "state": "detected or active (use active if there is a clear deadline or imminent action)"
 }
 
 Source item context:
@@ -107,6 +128,12 @@ Source item context:
         );
 
         const enriched = JSON.parse(response);
+
+        if (enriched.is_actionable === false) {
+          skipped++;
+          log(`    ~ skipped (not actionable): "${text.slice(0, 50)}" - ${enriched.skip_reason || 'informational'}`);
+          continue;
+        }
 
         insertCommitment(db, {
           id: uuid(),
