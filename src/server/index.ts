@@ -294,7 +294,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // Returns grouped, sorted commitments with full state tracking.
   app.get('/api/commitments', (_req, res) => {
     try {
-      const rows = db.prepare(\`
+      const rows = db.prepare(`
         SELECT id, text, owner, assigned_to, due_date, project, state, context,
                detected_from, detected_at, state_changed_at, importance, fulfilled_evidence
         FROM commitments
@@ -312,7 +312,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
           due_date IS NULL, due_date ASC,
           detected_at DESC
         LIMIT 200
-      \`).all() as any[];
+      `).all() as any[];
 
       // Classify ownership — is this Zach's commitment or someone else's?
       const userTerms = ['zach', 'me', 'i', 'i\'ll', 'i\'m', 'i will'];
