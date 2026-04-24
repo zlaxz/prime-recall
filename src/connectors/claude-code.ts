@@ -65,6 +65,12 @@ function discoverSessionsFromPath(basePath: string, days: number): CodeSession[]
       if (stat.mtimeMs < cutoff) continue;
       // Skip tiny files
       if (stat.size < 500) continue;
+      // Skip oversized files — readFileSync+JSON.parse on 100MB+ JSONLs blows the heap.
+      // extractConversationText caps output at 12KB anyway, so giant files add no value.
+      if (stat.size > 25 * 1024 * 1024) {
+        console.log(`  Skipping oversized session ${file} (${(stat.size / 1024 / 1024).toFixed(1)}MB)`);
+        continue;
+      }
 
       try {
         const content = readFileSync(filePath, 'utf-8');
