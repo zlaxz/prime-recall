@@ -97,6 +97,15 @@ async function tick() {
   const lastFull = lastFullRaw ? new Date(JSON.parse(lastFullRaw)).getTime() : 0;
 
   if (Date.now() - lastFull > 4 * HOUR_MS) {
+    // Stamp last_full_cycle BEFORE running the heavy work, not after.
+    // Otherwise, if the daemon OOMs/crashes mid-cycle (wiki compile, PM agents,
+    // Quinn on Opus, etc.), launchd KeepAlive restarts it within 60s and the
+    // gate re-fires on the SAME cycle, hammering DeepSeek/Claude APIs and
+    // crashing again. The 4-hour cooldown is the only thing that bounds cost.
+    db.prepare(
+      "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_full_cycle', ?, datetime('now'))"
+    ).run(JSON.stringify(new Date().toISOString()));
+
     // Promote commitments from knowledge.commitments JSON arrays into the structured
     // commitments table. Without this, commitment tracking is frozen to whenever
     // someone last ran \`recall refine\` manually.
@@ -209,7 +218,7 @@ async function tick() {
       }
     } catch (e) {}
 
-    db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_full_cycle', ?, datetime('now'))").run(JSON.stringify(new Date().toISOString()));
+    // (last_full_cycle was stamped at the START of this block — see above)
 
     // Source health monitor — check all ingestion sources for staleness
     console.log('[shift]   Running source health monitor...');
