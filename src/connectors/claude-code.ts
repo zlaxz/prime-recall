@@ -38,99 +38,120 @@ interface CodeSession {
   lastTimestamp: string;
 }
 
+// Lightweight metadata — no file reads, no JSON.parse.
+// We dedup against the DB on this BEFORE loading any JSONL contents,
+// to avoid OOMing on the 30-day, 233K-file laptop-sources tree.
+interface CodeSessionMeta {
+  path: string;
+  projectSlug: string;
+  sessionId: string;
+  mtimeMs: number;
+  size: number;
+}
+
 // ============================================================
-// Discovery
+// Discovery (cheap — stat only, no reads)
 // ============================================================
 
-function discoverSessionsFromPath(basePath: string, days: number): CodeSession[] {
+function discoverSessionMetaFromPath(basePath: string, days: number): CodeSessionMeta[] {
   if (!existsSync(basePath)) return [];
 
-  const sessions: CodeSession[] = [];
+  const out: CodeSessionMeta[] = [];
   const cutoff = Date.now() - days * 86400000;
 
   for (const projDir of safeReaddir(basePath)) {
     const projPath = join(basePath, projDir);
     if (!statSync(projPath).isDirectory()) continue;
 
-    // Skip subagents and tasks directories
     for (const file of safeReaddir(projPath)) {
       if (!file.endsWith('.jsonl')) continue;
-      // Skip subagent/task files
       if (file.startsWith('agent-') || file.startsWith('task-')) continue;
 
       const filePath = join(projPath, file);
       const stat = statSync(filePath);
 
-      // Date filter
       if (stat.mtimeMs < cutoff) continue;
-      // Skip tiny files
       if (stat.size < 500) continue;
-      // Skip oversized files — readFileSync+JSON.parse on 100MB+ JSONLs blows the heap.
-      // extractConversationText caps output at 12KB anyway, so giant files add no value.
+      // Oversized files would OOM on full read. extractConversationText caps at 12KB
+      // anyway, so giant files add no value.
       if (stat.size > 25 * 1024 * 1024) {
         console.log(`  Skipping oversized session ${file} (${(stat.size / 1024 / 1024).toFixed(1)}MB)`);
         continue;
       }
 
-      try {
-        const content = readFileSync(filePath, 'utf-8');
-        const lines = content.split('\n').filter(l => l.trim());
-        if (lines.length < 3) continue;
-
-        const messages: CodeMessage[] = [];
-        let firstTs = '';
-        let lastTs = '';
-
-        for (const line of lines) {
-          try {
-            const msg = JSON.parse(line);
-            messages.push(msg);
-            const ts = msg.timestamp || '';
-            if (ts && (!firstTs || ts < firstTs)) firstTs = ts;
-            if (ts && ts > lastTs) lastTs = ts;
-          } catch (_e) {}
-        }
-
-        // Need at least one user and one assistant message
-        const hasUser = messages.some(m => m.type === 'user' || m.message?.role === 'user');
-        const hasAssistant = messages.some(m => m.type === 'assistant' || m.message?.role === 'assistant');
-        if (!hasUser || !hasAssistant) continue;
-
-        sessions.push({
-          path: filePath,
-          projectSlug: projDir,
-          sessionId: file.replace('.jsonl', ''),
-          messages,
-          firstTimestamp: firstTs,
-          lastTimestamp: lastTs,
-        });
-      } catch (_e) {}
+      out.push({
+        path: filePath,
+        projectSlug: projDir,
+        sessionId: file.replace('.jsonl', ''),
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+      });
     }
   }
 
-  return sessions;
+  return out;
 }
 
-function discoverSessions(days: number): CodeSession[] {
-  const sessions = discoverSessionsFromPath(CLAUDE_CODE_BASE, days);
+function discoverSessionMeta(days: number): CodeSessionMeta[] {
+  const local = discoverSessionMetaFromPath(CLAUDE_CODE_BASE, days);
 
-  if (existsSync(CLAUDE_CODE_LAPTOP_BASE)) {
-    console.log(`  Scanning laptop-sources: ${CLAUDE_CODE_LAPTOP_BASE}`);
-    const laptopSessions = discoverSessionsFromPath(CLAUDE_CODE_LAPTOP_BASE, days);
-    // Dedup: local sessions take priority over laptop-sourced ones
-    const seenIds = new Set(sessions.map(s => s.sessionId));
-    let added = 0;
-    for (const ls of laptopSessions) {
-      if (!seenIds.has(ls.sessionId)) {
-        sessions.push(ls);
-        seenIds.add(ls.sessionId);
-        added++;
-      }
+  if (!existsSync(CLAUDE_CODE_LAPTOP_BASE)) return local;
+
+  console.log(`  Scanning laptop-sources: ${CLAUDE_CODE_LAPTOP_BASE}`);
+  const laptop = discoverSessionMetaFromPath(CLAUDE_CODE_LAPTOP_BASE, days);
+
+  const seenIds = new Set(local.map(s => s.sessionId));
+  let added = 0;
+  for (const ls of laptop) {
+    if (!seenIds.has(ls.sessionId)) {
+      local.push(ls);
+      seenIds.add(ls.sessionId);
+      added++;
     }
-    console.log(`  Laptop-sources: ${laptopSessions.length} found, ${added} new after dedup`);
   }
+  console.log(`  Laptop-sources: ${laptop.length} found, ${added} new after dedup`);
+  return local;
+}
 
-  return sessions;
+// ============================================================
+// Load (expensive — only call after DB dedup)
+// ============================================================
+
+function loadSession(meta: CodeSessionMeta): CodeSession | null {
+  try {
+    const content = readFileSync(meta.path, 'utf-8');
+    const lines = content.split('\n').filter(l => l.trim());
+    if (lines.length < 3) return null;
+
+    const messages: CodeMessage[] = [];
+    let firstTs = '';
+    let lastTs = '';
+
+    for (const line of lines) {
+      try {
+        const msg = JSON.parse(line);
+        messages.push(msg);
+        const ts = msg.timestamp || '';
+        if (ts && (!firstTs || ts < firstTs)) firstTs = ts;
+        if (ts && ts > lastTs) lastTs = ts;
+      } catch (_e) {}
+    }
+
+    const hasUser = messages.some(m => m.type === 'user' || m.message?.role === 'user');
+    const hasAssistant = messages.some(m => m.type === 'assistant' || m.message?.role === 'assistant');
+    if (!hasUser || !hasAssistant) return null;
+
+    return {
+      path: meta.path,
+      projectSlug: meta.projectSlug,
+      sessionId: meta.sessionId,
+      messages,
+      firstTimestamp: firstTs,
+      lastTimestamp: lastTs,
+    };
+  } catch (_e) {
+    return null;
+  }
 }
 
 /**
@@ -247,7 +268,7 @@ export async function connectClaudeCode(db: Database.Database): Promise<boolean>
     return false;
   }
 
-  const sessions = discoverSessions(30);
+  const sessions = discoverSessionMeta(30);
   const memoryFiles = discoverMemoryFiles();
 
   const projectSlugs = new Set(sessions.map(s => s.projectSlug));
@@ -330,27 +351,38 @@ export async function scanClaudeCode(
 
   // ── Phase 2: Conversation sessions ──
   console.log('  Phase 2: Discovering conversation sessions...');
-  const allSessions = discoverSessions(days);
-  const sessions = allSessions
-    .sort((a, b) => b.lastTimestamp.localeCompare(a.lastTimestamp))
+  const allMeta = discoverSessionMeta(days);
+  // Sort by file mtime (newest first) — proxy for last activity, free vs JSON.parse.
+  const candidates = allMeta
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, maxSessions);
 
-  console.log(`  Found ${allSessions.length} total, processing ${sessions.length}`);
+  console.log(`  Found ${allMeta.length} total, processing top ${candidates.length}`);
 
-  // Filter already indexed
-  const toProcess: CodeSession[] = [];
-  for (const session of sessions) {
-    const sourceRef = `claude-code:${session.sessionId}`;
-    const existing = db.prepare('SELECT id FROM knowledge WHERE source_ref = ?').get(sourceRef);
-    if (existing) {
+  // DB dedup BEFORE loading any file contents. This is the OOM fix:
+  // previously every candidate JSONL was readFileSync+JSON.parse'd into a
+  // messages array held in memory, then dedup happened. Across a 30-day
+  // laptop-sources tree that blew 8GB heap and crash-looped the daemon.
+  const lookup = db.prepare('SELECT id FROM knowledge WHERE source_ref = ?');
+  const newMeta: CodeSessionMeta[] = [];
+  for (const meta of candidates) {
+    const sourceRef = `claude-code:${meta.sessionId}`;
+    if (lookup.get(sourceRef)) {
       stats.skipped++;
     } else {
-      toProcess.push(session);
+      newMeta.push(meta);
     }
   }
 
-  console.log(`  ${toProcess.length} to process, ${stats.skipped} already indexed`);
-  if (toProcess.length === 0) return stats;
+  console.log(`  ${newMeta.length} to process, ${stats.skipped} already indexed`);
+  if (newMeta.length === 0) return stats;
+
+  // Load ONLY new sessions.
+  const toProcess: CodeSession[] = [];
+  for (const meta of newMeta) {
+    const session = loadSession(meta);
+    if (session) toProcess.push(session);
+  }
 
   // ── Phase 3: Extract conversation text ──
   console.log('  Phase 3: Extracting conversation text...');
