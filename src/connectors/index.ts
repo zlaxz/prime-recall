@@ -120,7 +120,7 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
   // Claude Code sessions (from laptop-sources sync)
   try {
     const { scanClaudeCode } = await import('./claude-code.js');
-    const ccResult = await scanClaudeCode(db, { days: 30, maxSessions: 100 });
+    const ccResult = await scanClaudeCode(db, { days: 30, maxSessions: 25 });
     if (ccResult.items > 0) results.push({ source: 'claude-code', items: ccResult.items });
   } catch (err: any) {
     if (!err.message?.includes('Cannot find')) {

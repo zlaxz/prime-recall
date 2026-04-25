@@ -385,10 +385,15 @@ export async function scanClaudeCode(
   }
 
   // ── Phase 3: Extract conversation text ──
+  // Free `session.messages` after text extraction — it's the dominant retainer
+  // (a fully parsed JSONL can be 10s of MB) and downstream phases only need
+  // the extracted text, sessionId, projectSlug, msgCount, and timestamps.
   console.log('  Phase 3: Extracting conversation text...');
   const sessionTexts = toProcess.map(session => {
     const text = extractConversationText(session);
-    return { session, text };
+    const msgCount = session.messages.length;
+    session.messages = []; // release for GC
+    return { session, text, msgCount };
   }).filter(s => s.text.length > 100);
 
   // ── Phase 4: AI extraction in parallel (5 concurrent) ──
@@ -399,16 +404,17 @@ export async function scanClaudeCode(
     session: CodeSession;
     extracted: Awaited<ReturnType<typeof extractIntelligence>>;
     text: string;
+    msgCount: number;
   }
 
   const processed: ProcessedSession[] = [];
 
   for (let i = 0; i < sessionTexts.length; i += CONCURRENCY) {
     const batch = sessionTexts.slice(i, i + CONCURRENCY);
-    const results = await Promise.all(batch.map(async ({ session, text }): Promise<ProcessedSession | null> => {
+    const results = await Promise.all(batch.map(async ({ session, text, msgCount }): Promise<ProcessedSession | null> => {
       try {
         const extracted = await extractIntelligence(text, apiKey);
-        return { session, extracted, text };
+        return { session, extracted, text, msgCount };
       } catch (err: any) {
         console.error(`\n    ✗ Extraction failed for ${session.projectSlug}: ${err.message?.slice(0, 100)}`);
         return null;
@@ -437,10 +443,9 @@ export async function scanClaudeCode(
   console.log('  Phase 6: Saving to knowledge base...');
 
   for (let i = 0; i < processed.length; i++) {
-    const { session, extracted } = processed[i];
+    const { session, extracted, msgCount } = processed[i];
     const embedding = embeddings[i];
     const projectName = projectSlugToName(session.projectSlug);
-    const msgCount = session.messages.length;
 
     const title = extracted.title || `Claude Code: ${projectName} session`;
 
