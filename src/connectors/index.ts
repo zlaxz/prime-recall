@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { scanGmail, scanSentMail } from './gmail.js';
+import { scanGmail } from './gmail.js';
 import { scanCalendar } from './calendar.js';
 import { scanClaude, importClaudeConversations } from './claude.js';
 import { scanCowork } from './cowork.js';
@@ -140,15 +140,12 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
     }
   }
 
-  // Gmail Sent — corrects false awaiting_reply tags + captures Zach-initiated threads
-  if (gmailTokens) {
-    try {
-      const sent = await scanSentMail(db, { days: 7, maxThreads: 100 });
-      results.push({ source: 'gmail-sent', items: sent.corrected + sent.newItems });
-    } catch (err: any) {
-      results.push({ source: 'gmail-sent', items: 0, error: err.message });
-    }
-  }
+  // Gmail Sent — DISABLED. scanSentMail is OAuth-only and the OAuth tokens were
+  // bound to quinn@ (the system email), not Zach's inbox — using it caused 10
+  // days of email to be ingested against the wrong account. Re-enable only after
+  // scanSentMail is updated to support service-account auth (feedback memory:
+  // gmail_service_account). Service-account Gmail scan above already covers
+  // received-mail; sent-mail correction tags are deferred.
 
     // ── TEAM MEMBER SYNC (via service account) ──
   // Sync Gmail + Calendar for non-CEO team members using domain-wide delegation
