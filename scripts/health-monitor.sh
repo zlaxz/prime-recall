@@ -1,149 +1,195 @@
 #!/bin/bash
 # ============================================================
-# Prime Self-Healing Health Monitor
+# Prime Self-Healing Health Monitor  (v2 — 2026-07-09)
 #
-# Runs every 5 minutes. Checks all systems. Fixes what it can.
-# Only alerts Zach when something is unfixable.
+# Runs every 5 min via com.prime.health LaunchAgent (GUI session,
+# so it can restart daemons and reach the Gmail send path).
 #
-# Checks: daemons, sync freshness, token validity, DB integrity,
-#          tunnel status, disk space
+# Philosophy: fix what it can silently; email/text Zach ONLY when
+# something is unfixable or needs a human (e.g. Claude re-login).
+#
+# Checks: daemons (serve/shift/claude-proxy/tunnel), serve API,
+#         Claude auth (the month-long silent failure), brief
+#         freshness (auto-regen), source sync freshness, DB, disk.
 # ============================================================
 
-LOG="$HOME/.prime/logs/health.log"
 PRIME_DIR="$HOME/GitHub/prime"
-ALERT_FILE="$HOME/.prime/health-alert"
+DB="$HOME/.prime/prime.db"
+LOG="$HOME/.prime/logs/health-monitor.log"
+ALERT_DIR="$HOME/.prime/health-alerts"
+UID_Z=$(id -u)
+mkdir -p "$ALERT_DIR"
 
-log() { echo "[$(date '+%H:%M')] $1" >> "$LOG"; }
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin"
+cd "$PRIME_DIR" || exit 1
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M')] $1" >> "$LOG"; }
+
+# alert: dedup by message hash so a persistent issue pings once, not every 5 min.
 alert() {
-  # Only alert once per issue (dedup by message hash)
-  HASH=$(echo "$1" | md5 -q)
-  if [ ! -f "$ALERT_FILE.$HASH" ]; then
-    touch "$ALERT_FILE.$HASH"
-    # Send iMessage alert
-    PHONE=$(sqlite3 ~/.prime/prime.db "SELECT value FROM config WHERE key='notify_phone_number'" 2>/dev/null | tr -d '"')
-    if [ -n "$PHONE" ]; then
-      osascript <<SCPT
-tell application "Messages" to send "[PRIME HEALTH] $1" to buddy "$PHONE"
-SCPT
-    fi
-    log "ALERT: $1"
+  local m="$1"
+  local hash
+  hash=$(echo "$m" | md5 -q)
+  if [ ! -f "$ALERT_DIR/$hash" ]; then
+    touch "$ALERT_DIR/$hash"
+    log "ALERT: $m"
+    npx tsx scripts/prime-alert.ts "$m" >> "$LOG" 2>&1
   fi
 }
+
+# clear_alert: issue resolved -> allow a fresh alert if it recurs later.
 clear_alert() {
-  HASH=$(echo "$1" | md5 -q)
-  rm -f "$ALERT_FILE.$HASH" 2>/dev/null
+  local hash
+  hash=$(echo "$1" | md5 -q)
+  rm -f "$ALERT_DIR/$hash" 2>/dev/null
+}
+
+restart_daemon() {  # label
+  log "restarting $1..."
+  launchctl kickstart -k "gui/$UID_Z/$1" 2>/dev/null
 }
 
 ISSUES=0
 
-# ── Check daemons ──────────────────────────────────────
-for DAEMON in serve sync listen tunnel; do
-  if ! launchctl list 2>/dev/null | grep -q "com.prime-recall.$DAEMON"; then
-    log "Daemon $DAEMON not loaded — reloading..."
-    launchctl load ~/Library/LaunchAgents/com.prime-recall.$DAEMON.plist 2>/dev/null
-    sleep 2
-    if launchctl list 2>/dev/null | grep -q "com.prime-recall.$DAEMON"; then
-      log "✓ Daemon $DAEMON recovered"
-      clear_alert "$DAEMON daemon down"
-    else
-      alert "$DAEMON daemon won't start. Check manually."
-      ISSUES=$((ISSUES + 1))
-    fi
-  fi
-done
+# ── 0. Manual self-test ────────────────────────────────
+# `touch ~/.prime/health-selftest` -> next run pings ALL alert channels once.
+# Bypasses dedup. Runs in the GUI session, so it's the valid iMessage test.
+if [ -f "$HOME/.prime/health-selftest" ]; then
+  rm -f "$HOME/.prime/health-selftest"
+  log "self-test requested — pinging all alert channels"
+  npx tsx scripts/prime-alert.ts "Self-test $(date '+%H:%M') — alert channels are working." >> "$LOG" 2>&1
+fi
 
-# ── Check serve is responding ──────────────────────────
-HEALTH=$(curl -s --max-time 5 http://localhost:3210/api/health 2>/dev/null)
-if echo "$HEALTH" | grep -q '"ok"'; then
-  clear_alert "API server not responding"
+# ── 1. serve API responding ────────────────────────────
+if curl -s --max-time 6 http://localhost:3210/api/health 2>/dev/null | grep -q '"ok"'; then
+  clear_alert "serve API (port 3210) not responding"
 else
-  log "API not responding — restarting serve daemon..."
-  launchctl unload ~/Library/LaunchAgents/com.prime-recall.serve.plist 2>/dev/null
-  sleep 2
-  launchctl load ~/Library/LaunchAgents/com.prime-recall.serve.plist 2>/dev/null
-  sleep 5
-  HEALTH2=$(curl -s --max-time 5 http://localhost:3210/api/health 2>/dev/null)
-  if echo "$HEALTH2" | grep -q '"ok"'; then
-    log "✓ API server recovered"
-    clear_alert "API server not responding"
+  log "serve API not responding — restarting com.prime-recall.serve"
+  restart_daemon "com.prime-recall.serve"
+  sleep 8
+  if curl -s --max-time 6 http://localhost:3210/api/health 2>/dev/null | grep -q '"ok"'; then
+    log "✓ serve recovered"
+    clear_alert "serve API (port 3210) not responding"
   else
-    alert "API server won't restart. Port 3210 may be in use."
+    alert "serve API (port 3210) not responding and won't restart."
     ISSUES=$((ISSUES + 1))
   fi
 fi
 
-# ── Check sync freshness ──────────────────────────────
-check_sync() {
-  local SOURCE=$1
-  local MAX_HOURS=$2
-  local LAST=$(sqlite3 ~/.prime/prime.db "SELECT last_sync_at FROM sync_state WHERE source='$SOURCE'" 2>/dev/null)
-  if [ -z "$LAST" ]; then return; fi
+# ── 2. Claude auth via proxy  (THE month-long silent failure) ──
+AUTH=$(curl -s --max-time 45 -X POST http://127.0.0.1:3211/claude \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Reply with exactly: OK","timeout":35}' 2>/dev/null)
+if echo "$AUTH" | grep -qE '"exit_code":0'; then
+  clear_alert "Claude auth FAILED (401) — Quinn cannot reason"
+  clear_alert "claude-proxy not responding"
+elif echo "$AUTH" | grep -qiE "401|authenticate|Invalid authentication"; then
+  # OAuth expired — cannot be auto-fixed (browser re-login required).
+  alert "Claude auth FAILED (401) — Quinn cannot reason. Fix: run 'claude' in a Terminal on the Mac Mini to re-login."
+  ISSUES=$((ISSUES + 1))
+else
+  # Proxy itself not answering — try a restart.
+  log "claude-proxy no/odd response — restarting"
+  restart_daemon "com.prime.claude-proxy"
+  sleep 6
+  AUTH2=$(curl -s --max-time 45 -X POST http://127.0.0.1:3211/claude -H "Content-Type: application/json" \
+    -d '{"prompt":"Reply with exactly: OK","timeout":35}' 2>/dev/null)
+  if echo "$AUTH2" | grep -qE '"exit_code":0'; then
+    log "✓ claude-proxy recovered"; clear_alert "claude-proxy not responding"
+  else
+    alert "claude-proxy not responding (port 3211) — Quinn/PM agents cannot run."
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
 
-  local AGE_HOURS=$(python3 -c "
+# ── 3. shift daemon alive ──────────────────────────────
+if pgrep -f "index.ts shift" >/dev/null 2>&1; then
+  clear_alert "shift daemon (intelligence cycle) is down"
+else
+  log "shift daemon down — restarting"
+  restart_daemon "com.prime.shift"
+  sleep 5
+  if pgrep -f "index.ts shift" >/dev/null 2>&1; then
+    log "✓ shift recovered"; clear_alert "shift daemon (intelligence cycle) is down"
+  else
+    alert "shift daemon (intelligence cycle) won't start."
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
+
+# ── 4. Intelligence brief freshness (auto-regen) ───────
+LAST_BRIEF=$(sqlite3 "$DB" "SELECT MAX(created_at) FROM knowledge WHERE source='briefing'" 2>/dev/null)
+if [ -n "$LAST_BRIEF" ]; then
+  BRIEF_AGE=$(python3 -c "
+from datetime import datetime, timezone
+last = datetime.fromisoformat('${LAST_BRIEF}'.replace(' ', 'T'))
+if last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)
+print(int((datetime.now(timezone.utc) - last).total_seconds() / 3600))
+" 2>/dev/null)
+  if [ -n "$BRIEF_AGE" ] && [ "$BRIEF_AGE" -gt 26 ]; then
+    log "brief ${BRIEF_AGE}h stale — auto-regenerating via /api/briefing"
+    curl -s --max-time 180 http://localhost:3210/api/briefing >/dev/null 2>&1
+    NEW_BRIEF=$(sqlite3 "$DB" "SELECT MAX(created_at) FROM knowledge WHERE source='briefing'" 2>/dev/null)
+    if [ "$NEW_BRIEF" != "$LAST_BRIEF" ]; then
+      log "✓ brief regenerated"; clear_alert "Intelligence brief stale and won't regenerate"
+    else
+      alert "Intelligence brief ${BRIEF_AGE}h stale and auto-regen failed."
+      ISSUES=$((ISSUES + 1))
+    fi
+  else
+    clear_alert "Intelligence brief stale and won't regenerate"
+  fi
+fi
+
+# ── 5. Source sync freshness ───────────────────────────
+check_sync() {  # source  max_hours
+  local LAST
+  LAST=$(sqlite3 "$DB" "SELECT MAX(created_at) FROM knowledge WHERE source='$1'" 2>/dev/null)
+  [ -z "$LAST" ] && return
+  local AGE
+  AGE=$(python3 -c "
 from datetime import datetime, timezone
 last = datetime.fromisoformat('${LAST}'.replace(' ', 'T'))
 if last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)
-age = (datetime.now(timezone.utc) - last).total_seconds() / 3600
-print(int(age))
+print(int((datetime.now(timezone.utc) - last).total_seconds() / 3600))
 " 2>/dev/null)
-
-  if [ -n "$AGE_HOURS" ] && [ "$AGE_HOURS" -gt "$MAX_HOURS" ]; then
-    alert "$SOURCE sync is ${AGE_HOURS}h stale (limit: ${MAX_HOURS}h). Token may be expired."
+  if [ -n "$AGE" ] && [ "$AGE" -gt "$2" ]; then
+    alert "$1 ingestion is ${AGE}h stale (limit ${2}h) — connector or token may be broken."
     ISSUES=$((ISSUES + 1))
   else
-    clear_alert "$SOURCE sync is"
+    clear_alert "$1 ingestion is"
   fi
 }
+check_sync "gmail" 6
+check_sync "calendar" 12
+check_sync "claude-code" 12
+check_sync "fireflies" 96
 
-check_sync "gmail" 1           # Gmail should sync within 1 hour
-check_sync "calendar" 1        # Calendar within 1 hour
-check_sync "claude" 2          # Claude.ai within 2 hours
-check_sync "cowork" 24         # Cowork within 24 hours
-check_sync "otter" 72          # Otter within 3 days
-check_sync "fireflies" 72      # Fireflies within 3 days
+# ── 6. DB integrity ────────────────────────────────────
+INTEG=$(sqlite3 "$DB" "PRAGMA quick_check" 2>/dev/null | head -1)
+if [ "$INTEG" = "ok" ]; then
+  clear_alert "Database integrity check failed"
+else
+  alert "Database integrity check failed: $INTEG"
+  ISSUES=$((ISSUES + 1))
+fi
 
-# ── Check DB integrity ─────────────────────────────────
-INTEGRITY=$(sqlite3 ~/.prime/prime.db "PRAGMA integrity_check" 2>/dev/null)
-if [ "$INTEGRITY" != "ok" ]; then
-  alert "Database corruption detected: $INTEGRITY"
+# ── 7. Disk space ──────────────────────────────────────
+FREE=$(df -g "$HOME" | tail -1 | awk '{print $4}')
+if [ -n "$FREE" ] && [ "$FREE" -lt 5 ]; then
+  alert "Low disk space on Mac Mini: ${FREE}GB free."
   ISSUES=$((ISSUES + 1))
 else
-  clear_alert "Database corruption"
+  clear_alert "Low disk space on Mac Mini"
 fi
 
-# ── Check disk space ───────────────────────────────────
-DISK_FREE=$(df -g ~ | tail -1 | awk '{print $4}')
-if [ "$DISK_FREE" -lt 5 ]; then
-  alert "Low disk space: ${DISK_FREE}GB free"
-  ISSUES=$((ISSUES + 1))
+# ── 8. Tunnel (best-effort restart, no alert) ──────────
+if ! pgrep -f "cloudflared" >/dev/null 2>&1; then
+  log "tunnel down — restarting"; restart_daemon "com.prime-recall.tunnel"
 fi
 
-# ── Check tunnel ───────────────────────────────────────
-TUNNEL_PID=$(pgrep -f "cloudflared tunnel" 2>/dev/null)
-if [ -z "$TUNNEL_PID" ]; then
-  log "Tunnel not running — restarting..."
-  launchctl unload ~/Library/LaunchAgents/com.prime-recall.tunnel.plist 2>/dev/null
-  launchctl load ~/Library/LaunchAgents/com.prime-recall.tunnel.plist 2>/dev/null
-  clear_alert "Tunnel down"
-fi
-
-# ── Check dream pipeline freshness ─────────────────────
-LAST_DREAM=$(sqlite3 ~/.prime/prime.db "SELECT value FROM graph_state WHERE key='last_dream_run'" 2>/dev/null)
-if [ -n "$LAST_DREAM" ]; then
-  DREAM_AGE=$(python3 -c "
-from datetime import datetime, timezone
-last = datetime.fromisoformat('${LAST_DREAM}'.replace('\"',''))
-if last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)
-age = (datetime.now(timezone.utc) - last).total_seconds() / 3600
-print(int(age))
-" 2>/dev/null)
-  if [ -n "$DREAM_AGE" ] && [ "$DREAM_AGE" -gt 36 ]; then
-    alert "Dream pipeline hasn't run in ${DREAM_AGE}h. Cron job may be broken."
-    ISSUES=$((ISSUES + 1))
-  fi
-fi
-
-# ── Summary ────────────────────────────────────────────
 if [ "$ISSUES" -eq 0 ]; then
-  log "✓ All systems healthy"
+  log "✓ all systems healthy"
+else
+  log "$ISSUES unresolved issue(s)"
 fi
