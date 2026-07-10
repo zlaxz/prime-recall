@@ -21,6 +21,9 @@ export async function startScheduler(intervalMinutes: number = 15) {
       if (total > 0) {
         console.log(`  [${timestamp}] Synced: ${results.map(r => `${r.source}=${r.items}`).join(', ')}`);
       }
+      for (const r of results) {
+        if (r.error) console.error(`  [${timestamp}] ${r.source} sync error: ${r.error}`);
+      }
     } catch (err: any) {
       console.error(`  [${timestamp}] Sync error: ${err.message}`);
     }

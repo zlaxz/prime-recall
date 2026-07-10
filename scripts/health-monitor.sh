@@ -143,8 +143,16 @@ fi
 
 # ── 5. Source sync freshness ───────────────────────────
 check_sync() {  # source  max_hours
-  local LAST
-  LAST=$(sqlite3 "$DB" "SELECT MAX(created_at) FROM knowledge WHERE source='$1'" 2>/dev/null)
+  # Freshness = sync_state.last_sync_at, which only advances when a scan
+  # COMPLETES successfully. MAX(created_at) of knowledge items was the old
+  # signal and it false-alarmed: a quiet inbox or a replies-only stretch
+  # creates no new items even though the connector is healthy.
+  # Alert text is stable (no hour count) so md5 dedup fires once per
+  # incident instead of hourly, and clear_alert can actually clear it.
+  local LAST MSG
+  MSG="$1 sync has not completed successfully in over ${2}h — connector or token may be broken."
+  LAST=$(sqlite3 "$DB" "SELECT last_sync_at FROM sync_state WHERE source='$1'" 2>/dev/null)
+  [ -z "$LAST" ] && LAST=$(sqlite3 "$DB" "SELECT MAX(created_at) FROM knowledge WHERE source='$1'" 2>/dev/null)
   [ -z "$LAST" ] && return
   local AGE
   AGE=$(python3 -c "
@@ -154,10 +162,11 @@ if last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)
 print(int((datetime.now(timezone.utc) - last).total_seconds() / 3600))
 " 2>/dev/null)
   if [ -n "$AGE" ] && [ "$AGE" -gt "$2" ]; then
-    alert "$1 ingestion is ${AGE}h stale (limit ${2}h) — connector or token may be broken."
+    log "$1 sync stale: last success ${AGE}h ago (limit ${2}h)"
+    alert "$MSG"
     ISSUES=$((ISSUES + 1))
   else
-    clear_alert "$1 ingestion is"
+    clear_alert "$MSG"
   fi
 }
 check_sync "gmail" 6

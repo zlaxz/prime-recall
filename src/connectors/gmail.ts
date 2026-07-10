@@ -382,6 +382,7 @@ export async function scanGmail(
 
       // Skip noise items (extraction identified as automated/marketing)
       if (ext.tags?.includes('noise') || ext.title === '[NOISE]') {
+        console.log(`    ai-noise: "${td.subject.slice(0, 50)}"`);
         return;
       }
 
@@ -434,7 +435,7 @@ export async function scanGmail(
         process.stdout.write(`\r  Extracted: ${extracted}/${threadData.length}`);
       }
       return true;
-    } catch { return false; }
+    } catch (err: any) { console.error(`    thread ${td.id} FAILED: ${err.message}`); return false; }
   }
 
   // Run with concurrency limiter
