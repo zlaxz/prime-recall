@@ -452,7 +452,9 @@ export async function scanClaudeCode(
     const item: KnowledgeItem = {
       id: uuid(),
       title,
-      summary: extracted.summary,
+      // Fallback: extraction can return no summary; NOT NULL column, and one
+      // failed insert aborts the whole sync cycle (all later items lost).
+      summary: extracted.summary || title,
       source: 'claude-code',
       source_ref: `claude-code:${session.sessionId}`,
       source_date: session.lastTimestamp,
