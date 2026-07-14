@@ -22,8 +22,9 @@ import { notify } from './notify.js';
 // ============================================================
 
 const MESSAGES_DB = join(homedir(), 'Library', 'Messages', 'chat.db');
-const POLL_INTERVAL = 30_000; // 30 seconds
+const POLL_INTERVAL = 5_000; // 5 seconds — conversational latency
 const STATE_KEY = 'imessage_listener_last_rowid';
+const QUINN_SESSION_KEY = 'imessage_quinn_session';
 
 /**
  * Read recent incoming messages from Zach's phone number.
@@ -73,6 +74,46 @@ function sendReply(phone: string, text: string): boolean {
   } catch (err: any) {
     console.error(`[iMessage] Send error: ${err.message?.slice(0, 100)}`);
     return false;
+  }
+}
+
+/**
+ * Route a conversational message to Quinn via the serve's /api/prime endpoint.
+ * One persistent session across texts (text RESET or NEW to start fresh).
+ */
+async function quinnChat(db: Database.Database, text: string, zachPhone: string): Promise<void> {
+  const apiKey = getConfig(db, 'prime_api_key') || process.env.PRIME_API_KEY || '';
+  const sessionId = (db.prepare("SELECT value FROM graph_state WHERE key = ?").get(QUINN_SESSION_KEY) as any)?.value || '';
+
+  // One "thinking" ack if Quinn takes a while — keeps the thread from feeling dead
+  const ackTimer = setTimeout(() => {
+    sendReply(zachPhone, '\u2026on it, give me a minute');
+  }, 25_000);
+
+  try {
+    const resp = await fetch('http://127.0.0.1:3210/api/prime', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': String(apiKey) },
+      body: JSON.stringify({ message: text, session_id: sessionId }),
+      signal: AbortSignal.timeout(180_000),
+    });
+    clearTimeout(ackTimer);
+    const result: any = await resp.json();
+
+    if (result?.session_id) {
+      db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+        .run(QUINN_SESSION_KEY, result.session_id);
+    }
+
+    const content: string = result?.content || result?.error || 'Quinn returned an empty response.';
+    // Split very long replies for readability
+    const CHUNK = 3500;
+    for (let i = 0; i < content.length; i += CHUNK) {
+      sendReply(zachPhone, content.slice(i, i + CHUNK));
+    }
+  } catch (err: any) {
+    clearTimeout(ackTimer);
+    sendReply(zachPhone, `Quinn is unreachable (${err.message?.slice(0, 60)}). The serve may be restarting \u2014 try again in a minute.`);
   }
 }
 
@@ -169,9 +210,15 @@ async function processReply(db: Database.Database, text: string, zachPhone: stri
       sendReply(zachPhone, `${pending.length} pending:\n${lines}\n\nReply YES/NO/#/LATER`);
     }
 
+  } else if (cmd === 'RESET' || cmd === 'NEW') {
+    db.prepare('DELETE FROM graph_state WHERE key = ?').run(QUINN_SESSION_KEY);
+    sendReply(zachPhone, 'Fresh Quinn conversation started.');
+    console.log('[iMessage] Quinn session reset');
+
   } else {
-    // Unknown command — ignore silently (might be a normal conversation)
-    console.log(`[iMessage] Ignored unrecognized: "${text.trim().slice(0, 50)}"`);
+    // Not a command — it's conversation. Route to Quinn.
+    console.log(`[iMessage] \u2192 Quinn: "${text.trim().slice(0, 80)}"`);
+    await quinnChat(db, text.trim(), zachPhone);
   }
 }
 
@@ -192,12 +239,29 @@ export async function startListener(): Promise<void> {
     (db.prepare("SELECT value FROM graph_state WHERE key = ?").get(STATE_KEY) as any)?.value || '0'
   );
 
+  // First run: start from the newest message — never replay history
+  if (!lastRowId) {
+    try {
+      const msgDb = new Database(MESSAGES_DB, { readonly: true, fileMustExist: true });
+      lastRowId = (msgDb.prepare('SELECT MAX(ROWID) as m FROM message').get() as any)?.m || 0;
+      msgDb.close();
+      db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+        .run(STATE_KEY, String(lastRowId));
+      console.log(`[iMessage] First run \u2014 starting from ROWID ${lastRowId}`);
+    } catch (err: any) {
+      console.error(`[iMessage] Could not read chat.db for initial ROWID: ${err.message}`);
+    }
+  }
+
   console.log(`[iMessage] Listener started. Monitoring replies from ${zachPhone}`);
   console.log(`[iMessage] Last processed ROWID: ${lastRowId}`);
-  console.log(`[iMessage] Commands: YES/Y, NO/N, #, LATER/SNOOZE, STATUS, LIST`);
+  console.log(`[iMessage] Commands: YES/Y, NO/N, #, LATER/SNOOZE, STATUS, LIST, RESET/NEW \u2014 anything else routes to Quinn`);
   console.log(`[iMessage] Polling every ${POLL_INTERVAL / 1000}s\n`);
 
+  let polling = false;
   const poll = async () => {
+    if (polling) return; // a Quinn call can outlast the interval — don't overlap
+    polling = true;
     try {
       const messages = getNewMessages(lastRowId, zachPhone);
 
@@ -212,6 +276,8 @@ export async function startListener(): Promise<void> {
       }
     } catch (err: any) {
       console.error(`[iMessage] Poll error: ${err.message}`);
+    } finally {
+      polling = false;
     }
   };
 
