@@ -27,6 +27,26 @@ const STATE_KEY = 'imessage_listener_last_rowid';
 const QUINN_SESSION_KEY = 'imessage_quinn_session';
 
 /**
+ * Extract plain text from a Messages attributedBody typedstream blob.
+ * Modern macOS leaves message.text NULL and stores the text after the
+ * NSString class marker: "NSString" + 01 94 84 01 2B + length + utf8 bytes
+ * (length is one byte, or 0x81 + uint16 LE for texts over 255 bytes).
+ * Verified against real chat.db rows on the Mini, 2026-07-14.
+ */
+function decodeAttributedBody(buf: Buffer | null): string {
+  if (!buf || !buf.length) return '';
+  const marker = Buffer.from('NSString');
+  const idx = buf.indexOf(marker);
+  if (idx === -1) return '';
+  const i = idx + marker.length + 5;
+  if (i >= buf.length) return '';
+  let length: number, start: number;
+  if (buf[i] === 0x81) { length = buf.readUInt16LE(i + 1); start = i + 3; }
+  else { length = buf[i]; start = i + 1; }
+  return buf.slice(start, start + length).toString('utf8');
+}
+
+/**
  * Read recent incoming messages from Zach's phone number.
  */
 function getNewMessages(lastRowId: number, zachPhone: string): { rowid: number; text: string; date: number }[] {
@@ -37,19 +57,20 @@ function getNewMessages(lastRowId: number, zachPhone: string): { rowid: number; 
     const msgDb = new Database(MESSAGES_DB, { readonly: true, fileMustExist: true });
 
     const rows = msgDb.prepare(`
-      SELECT m.ROWID as rowid, m.text, m.date
+      SELECT m.ROWID as rowid, m.text, m.attributedBody as body, m.date
       FROM message m
       JOIN handle h ON m.handle_id = h.ROWID
       WHERE h.id LIKE ?
         AND m.is_from_me = 0
         AND m.ROWID > ?
-        AND m.text IS NOT NULL
       ORDER BY m.ROWID ASC
       LIMIT 10
     `).all(`%${zachPhone.replace(/[^0-9]/g, '').slice(-10)}%`, lastRowId) as any[];
 
     msgDb.close();
-    return rows;
+    return rows
+      .map(r => ({ rowid: r.rowid, text: r.text || decodeAttributedBody(r.body), date: r.date }))
+      .filter(r => r.text && r.text.trim().length > 0);
   } catch (err: any) {
     console.error(`[iMessage] DB read error: ${err.message}`);
     return [];
