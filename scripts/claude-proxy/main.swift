@@ -75,15 +75,17 @@ class HTTPServer {
         guard firstRead > 0 else { close(fd); return }
         allData.append(contentsOf: buf[..<firstRead])
 
-        // Check Content-Length and keep reading until we have the full body
-        if let headerStr = String(data: allData, encoding: .utf8),
+        // Check Content-Length and keep reading until we have the full body.
+        // Header size MUST be computed in BYTES from raw Data — Swift String
+        // counts \r\n as ONE Character, so String.distance under-counts by one
+        // byte per CRLF and the read loop stops short, truncating the body.
+        if let hdrEnd = allData.range(of: Data([13, 10, 13, 10])),
+           let headerStr = String(data: allData.subdata(in: 0..<hdrEnd.upperBound), encoding: .utf8),
            let clRange = headerStr.range(of: "Content-Length: ", options: .caseInsensitive),
            let endRange = headerStr[clRange.upperBound...].range(of: "\r\n") {
             let clStr = String(headerStr[clRange.upperBound..<endRange.lowerBound])
-            if let contentLength = Int(clStr),
-               let headerEnd = headerStr.range(of: "\r\n\r\n") {
-                let headerSize = headerStr.distance(from: headerStr.startIndex, to: headerEnd.upperBound)
-                let totalNeeded = headerSize + contentLength
+            if let contentLength = Int(clStr) {
+                let totalNeeded = hdrEnd.upperBound + contentLength
 
                 while allData.count < totalNeeded {
                     let n = read(fd, &buf, min(buf.count, totalNeeded - allData.count))
