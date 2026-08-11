@@ -26,13 +26,18 @@ export function mountMcpHttp(app: Express) {
       // Check for existing session
       if (sessionId && transports.has(sessionId)) {
         const transport = transports.get(sessionId)!;
-        await transport.handleRequest(req, res);
+        // express.json() already consumed the stream — must pass the parsed body
+        await transport.handleRequest(req, res, req.body);
         return;
       }
 
       // New session — create transport + server
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
+        // Session id is assigned DURING handleRequest(initialize) — storing the
+        // transport before that ran left the map empty and every follow-up
+        // request hit a fresh uninitialized transport.
+        onsessioninitialized: (sid) => transports.set(sid, transport),
       });
 
       const server = new McpServer(MCP_SERVER_CONFIG);
@@ -45,11 +50,7 @@ export function mountMcpHttp(app: Express) {
 
       await server.connect(transport);
 
-      // Store transport by the session ID it generated
-      const newSessionId = (transport as any).sessionId;
-      if (newSessionId) transports.set(newSessionId, transport);
-
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, req.body);
 
     } else if (req.method === 'GET') {
       // SSE stream for server-initiated messages
