@@ -133,7 +133,9 @@ class HTTPServer {
             // Load MCP config
             let mcpConfig = NSHomeDirectory() + "/.claude/.mcp.json"
             if FileManager.default.fileExists(atPath: mcpConfig) {
-                args += ["--mcp-config", mcpConfig]
+                // strict: account-level claude.ai connectors (unauthenticatable
+                // headless) shadow the local prime-recall server by name
+                args += ["--mcp-config", mcpConfig, "--strict-mcp-config"]
             }
 
             // System prompt for Prime identity
@@ -240,7 +242,7 @@ class HTTPServer {
         // Load MCP config if available
         let mcpConfig = NSHomeDirectory() + "/.claude/.mcp.json"
         if FileManager.default.fileExists(atPath: mcpConfig) {
-            args += ["--mcp-config", mcpConfig]
+            args += ["--mcp-config", mcpConfig, "--strict-mcp-config"]
         }
 
         // Background mode: spawn claude, respond immediately with 202, don't wait
