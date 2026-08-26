@@ -3555,18 +3555,18 @@ export async function runDreamPipeline(
   console.log('  Task 15: Prediction verification (DeepSeek)...');
   const r15 = await task15PredictionVerification(db);
   results.push(r15);
-  console.log(`    ${r15.status === 'success' ? '✓' : r15.status === 'skipped' ? '○' : '✗'} ${r15.status} (${r15.duration_seconds.toFixed(1)}s)${r15.output ? ` — ${JSON.stringify(r15.output).slice(0, 120)}` : ''}`);
+  console.log(`    ${r15.status === 'success' ? '✓' : r15.status === 'skipped' ? '○' : '✗'} ${r15.status} (${r15.duration_seconds.toFixed(1)}s)${r15.output ? ` — ${JSON.stringify(r15.output).slice(0, 120)}` : r15.error ? ` — ${r15.error.slice(0, 120)}` : ''}`);
 
   console.log('  Task 16: Strategic reflection (Claude)...');
   const r16 = await task16StrategicReflection(db);
   results.push(r16);
-  console.log(`    ${r16.status === 'success' ? '✓' : r16.status === 'skipped' ? '○' : '✗'} ${r16.status} (${r16.duration_seconds.toFixed(1)}s)${r16.output ? ` — ${JSON.stringify(r16.output).slice(0, 120)}` : ''}`);
+  console.log(`    ${r16.status === 'success' ? '✓' : r16.status === 'skipped' ? '○' : '✗'} ${r16.status} (${r16.duration_seconds.toFixed(1)}s)${r16.output ? ` — ${JSON.stringify(r16.output).slice(0, 120)}` : r16.error ? ` — ${r16.error.slice(0, 120)}` : ''}`);
 
   // Task 01: Consolidate
   console.log('  Task 01: Consolidate new signals...');
   const r01 = await task01Consolidate(db);
   results.push(r01);
-  console.log(`    ${r01.status === 'success' ? '✓' : r01.status === 'skipped' ? '○' : '✗'} ${r01.status} (${r01.duration_seconds.toFixed(1)}s)${r01.output ? ` — ${JSON.stringify(r01.output).slice(0, 100)}` : ''}`);
+  console.log(`    ${r01.status === 'success' ? '✓' : r01.status === 'skipped' ? '○' : '✗'} ${r01.status} (${r01.duration_seconds.toFixed(1)}s)${r01.output ? ` — ${JSON.stringify(r01.output).slice(0, 100)}` : r01.error ? ` — ${r01.error.slice(0, 100)}` : ''}`);
 
   // Task 02: SKIPPED — replaced by Task 06 (deep entity understanding)
   // Task 02 was shallow (stats only). Task 06 sends full context + extracted intelligence.
@@ -3575,7 +3575,7 @@ export async function runDreamPipeline(
   console.log('  Task 03: Check commitments...');
   const r03 = await task03CommitmentCheck(db);
   results.push(r03);
-  console.log(`    ${r03.status === 'success' ? '✓' : '✗'} ${r03.status} (${r03.duration_seconds.toFixed(1)}s)${r03.output ? ` — ${JSON.stringify(r03.output).slice(0, 100)}` : ''}`);
+  console.log(`    ${r03.status === 'success' ? '✓' : '✗'} ${r03.status} (${r03.duration_seconds.toFixed(1)}s)${r03.output ? ` — ${JSON.stringify(r03.output).slice(0, 100)}` : r03.error ? ` — ${r03.error.slice(0, 100)}` : ''}`);
 
   // Task 12: Meeting prep (skip in quick mode — wiki agents handle this)
   console.log('  Task 12: Meeting prep...');
@@ -3583,7 +3583,7 @@ export async function runDreamPipeline(
     ? { task: '12-meeting-prep', status: 'skipped' as const, duration_seconds: 0, output: { reason: 'quick mode' } }
     : await task12MeetingPrep(db);
   results.push(r12);
-  console.log(`    ${r12.status === 'success' ? '✓' : r12.status === 'skipped' ? '○' : '✗'} ${r12.status} (${r12.duration_seconds.toFixed(1)}s)${r12.output ? ` — ${JSON.stringify(r12.output).slice(0, 100)}` : ''}`);
+  console.log(`    ${r12.status === 'success' ? '✓' : r12.status === 'skipped' ? '○' : '✗'} ${r12.status} (${r12.duration_seconds.toFixed(1)}s)${r12.output ? ` — ${JSON.stringify(r12.output).slice(0, 100)}` : r12.error ? ` — ${r12.error.slice(0, 100)}` : ''}`);
 
   // Task 13: Episodic extraction (skip in quick mode — wiki agents do this)
   console.log('  Task 13: Episodic memory extraction (LLM)...');
@@ -3591,13 +3591,13 @@ export async function runDreamPipeline(
     ? { task: '13-episodic', status: 'skipped' as const, duration_seconds: 0, output: { reason: 'quick mode' } }
     : await task13EpisodicExtraction(db);
   results.push(r13);
-  console.log(`    ${r13.status === 'success' ? '✓' : r13.status === 'skipped' ? '○' : '✗'} ${r13.status} (${r13.duration_seconds.toFixed(1)}s)${r13.output ? ` — ${JSON.stringify(r13.output).slice(0, 100)}` : ''}`);
+  console.log(`    ${r13.status === 'success' ? '✓' : r13.status === 'skipped' ? '○' : '✗'} ${r13.status} (${r13.duration_seconds.toFixed(1)}s)${r13.output ? ` — ${JSON.stringify(r13.output).slice(0, 100)}` : r13.error ? ` — ${r13.error.slice(0, 100)}` : ''}`);
 
   // Task 17: Narrative Thread Builder (cross-source threading)
   console.log('  Task 17: Narrative thread builder (DeepSeek + Claude)...');
   const r17 = await task17ThreadBuilder(db);
   results.push(r17);
-  console.log(`    ${r17.status === 'success' ? '✓' : r17.status === 'skipped' ? '○' : '✗'} ${r17.status} (${r17.duration_seconds.toFixed(1)}s)${r17.output ? ` — ${JSON.stringify(r17.output).slice(0, 120)}` : ''}`);
+  console.log(`    ${r17.status === 'success' ? '✓' : r17.status === 'skipped' ? '○' : '✗'} ${r17.status} (${r17.duration_seconds.toFixed(1)}s)${r17.output ? ` — ${JSON.stringify(r17.output).slice(0, 120)}` : r17.error ? ` — ${r17.error.slice(0, 120)}` : ''}`);
 
   // ── INTELLIGENCE LAYER (LLM-powered, skip in quick mode) ──────
   if (!options.quick) {
@@ -3605,19 +3605,19 @@ export async function runDreamPipeline(
     console.log('  Task 06: Entity understanding (LLM)...');
     const r06 = await task06EntityUnderstanding(db);
     results.push(r06);
-    console.log(`    ${r06.status === 'success' ? '✓' : r06.status === 'skipped' ? '○' : '✗'} ${r06.status} (${r06.duration_seconds.toFixed(1)}s)${r06.output ? ` — ${JSON.stringify(r06.output).slice(0, 100)}` : ''}`);
+    console.log(`    ${r06.status === 'success' ? '✓' : r06.status === 'skipped' ? '○' : '✗'} ${r06.status} (${r06.duration_seconds.toFixed(1)}s)${r06.output ? ` — ${JSON.stringify(r06.output).slice(0, 100)}` : r06.error ? ` — ${r06.error.slice(0, 100)}` : ''}`);
 
     // Task 07: Project Understanding — WHAT's happening and WHERE it's going
     console.log('  Task 07: Project understanding (LLM)...');
     const r07 = await task07ProjectUnderstanding(db);
     results.push(r07);
-    console.log(`    ${r07.status === 'success' ? '✓' : r07.status === 'skipped' ? '○' : '✗'} ${r07.status} (${r07.duration_seconds.toFixed(1)}s)${r07.output ? ` — ${JSON.stringify(r07.output).slice(0, 150)}` : ''}`);
+    console.log(`    ${r07.status === 'success' ? '✓' : r07.status === 'skipped' ? '○' : '✗'} ${r07.status} (${r07.duration_seconds.toFixed(1)}s)${r07.output ? ` — ${JSON.stringify(r07.output).slice(0, 150)}` : r07.error ? ` — ${r07.error.slice(0, 150)}` : ''}`);
 
     // Task 14: Strategic Investigation — deep dive on stalling projects
     console.log('  Task 14: Strategic investigation (LLM)...');
     const r14 = await task14Investigation(db);
     results.push(r14);
-    console.log(`    ${r14.status === 'success' ? '✓' : r14.status === 'skipped' ? '○' : '✗'} ${r14.status} (${r14.duration_seconds.toFixed(1)}s)${r14.output ? ` — ${JSON.stringify(r14.output).slice(0, 150)}` : ''}`);
+    console.log(`    ${r14.status === 'success' ? '✓' : r14.status === 'skipped' ? '○' : '✗'} ${r14.status} (${r14.duration_seconds.toFixed(1)}s)${r14.output ? ` — ${JSON.stringify(r14.output).slice(0, 150)}` : r14.error ? ` — ${r14.error.slice(0, 150)}` : ''}`);
 
     // Task 18: Strategic Action Generator — what WORK should Zach do?
     // Unlike Task 14 (stalling investigation), this generates PROACTIVE work items
@@ -3625,50 +3625,50 @@ export async function runDreamPipeline(
     console.log('  Task 18: Strategic action generation (DeepSeek)...');
     const r18 = await task18StrategicActions(db);
     results.push(r18);
-    console.log(`    ${r18.status === 'success' ? '✓' : r18.status === 'skipped' ? '○' : '✗'} ${r18.status} (${r18.duration_seconds.toFixed(1)}s)${r18.output ? ` — ${JSON.stringify(r18.output).slice(0, 150)}` : ''}`);
+    console.log(`    ${r18.status === 'success' ? '✓' : r18.status === 'skipped' ? '○' : '✗'} ${r18.status} (${r18.duration_seconds.toFixed(1)}s)${r18.output ? ` — ${JSON.stringify(r18.output).slice(0, 150)}` : r18.error ? ` — ${r18.error.slice(0, 150)}` : ''}`);
 
     // Task 08: Commitment Verification — WHAT's real vs stale
     console.log('  Task 08: Commitment verification (LLM)...');
     const r08 = await task08CommitmentVerification(db);
     results.push(r08);
-    console.log(`    ${r08.status === 'success' ? '✓' : r08.status === 'skipped' ? '○' : '✗'} ${r08.status} (${r08.duration_seconds.toFixed(1)}s)${r08.output ? ` — ${JSON.stringify(r08.output).slice(0, 100)}` : ''}`);
+    console.log(`    ${r08.status === 'success' ? '✓' : r08.status === 'skipped' ? '○' : '✗'} ${r08.status} (${r08.duration_seconds.toFixed(1)}s)${r08.output ? ` — ${JSON.stringify(r08.output).slice(0, 100)}` : r08.error ? ` — ${r08.error.slice(0, 100)}` : ''}`);
   }
 
   // Task 10: Consistency verification (runs BEFORE world rebuild to fix derived data)
   console.log('  Task 10: Consistency verification...');
   const r10 = await task10ConsistencyVerification(db);
   results.push(r10);
-  console.log(`    ${r10.status === 'success' ? '✓' : '✗'} ${r10.status} (${r10.duration_seconds.toFixed(1)}s)${r10.output ? ` — ${JSON.stringify(r10.output).slice(0, 150)}` : ''}`);
+  console.log(`    ${r10.status === 'success' ? '✓' : '✗'} ${r10.status} (${r10.duration_seconds.toFixed(1)}s)${r10.output ? ` — ${JSON.stringify(r10.output).slice(0, 150)}` : r10.error ? ` — ${r10.error.slice(0, 150)}` : ''}`);
 
   // Task 11: Claim verification — doubt every assertion, check against reality
   console.log('  Task 11: Claim verification (LLM + search)...');
   const r11 = await task11ClaimVerification(db);
   results.push(r11);
-  console.log(`    ${r11.status === 'success' ? '✓' : '✗'} ${r11.status} (${r11.duration_seconds.toFixed(1)}s)${r11.output ? ` — ${JSON.stringify(r11.output).slice(0, 150)}` : ''}`);
+  console.log(`    ${r11.status === 'success' ? '✓' : '✗'} ${r11.status} (${r11.duration_seconds.toFixed(1)}s)${r11.output ? ` — ${JSON.stringify(r11.output).slice(0, 150)}` : r11.error ? ` — ${r11.error.slice(0, 150)}` : ''}`);
 
   // Task 19: Gap Detection — find what's MISSING (pure SQL, no LLM)
   console.log('  Task 19: Gap detection (SQL)...');
   const r19 = await task19GapDetection(db);
   results.push(r19);
-  console.log(`    ${r19.status === 'success' ? '✓' : '✗'} ${r19.status} (${r19.duration_seconds.toFixed(1)}s)${r19.output ? ` — ${JSON.stringify(r19.output).slice(0, 150)}` : ''}`);
+  console.log(`    ${r19.status === 'success' ? '✓' : '✗'} ${r19.status} (${r19.duration_seconds.toFixed(1)}s)${r19.output ? ` — ${JSON.stringify(r19.output).slice(0, 150)}` : r19.error ? ` — ${r19.error.slice(0, 150)}` : ''}`);
 
   // Task 22: Memory Consolidation — deduplicate, archive stale, detect contradictions, promote facts (pure SQL, no LLM)
   console.log('  Task 22: Memory consolidation (SQL)...');
   const r22 = await task22MemoryConsolidation(db);
   results.push(r22);
-  console.log(`    ${r22.status === 'success' ? '✓' : '✗'} ${r22.status} (${r22.duration_seconds.toFixed(1)}s)${r22.output ? ` — ${JSON.stringify(r22.output).slice(0, 150)}` : ''}`);
+  console.log(`    ${r22.status === 'success' ? '✓' : '✗'} ${r22.status} (${r22.duration_seconds.toFixed(1)}s)${r22.output ? ` — ${JSON.stringify(r22.output).slice(0, 150)}` : r22.error ? ` — ${r22.error.slice(0, 150)}` : ''}`);
 
   // Task 23: Cross-Project Pattern Detection — connector entities, timeline overlaps, commitment pileups (pure SQL, no LLM)
   console.log('  Task 23: Cross-project pattern detection (SQL)...');
   const r23 = await task23CrossProjectPatterns(db);
   results.push(r23);
-  console.log(`    ${r23.status === 'success' ? '✓' : '✗'} ${r23.status} (${r23.duration_seconds.toFixed(1)}s)${r23.output ? ` — ${JSON.stringify(r23.output).slice(0, 150)}` : ''}`);
+  console.log(`    ${r23.status === 'success' ? '✓' : '✗'} ${r23.status} (${r23.duration_seconds.toFixed(1)}s)${r23.output ? ` — ${JSON.stringify(r23.output).slice(0, 150)}` : r23.error ? ` — ${r23.error.slice(0, 150)}` : ''}`);
 
   // Task 04: Structured world rebuild (AFTER all verification — data is now clean)
   console.log('  Task 04: Rebuild structured world model...');
   const r04 = await task04WorldRebuild(db);
   results.push(r04);
-  console.log(`    ${r04.status === 'success' ? '✓' : '✗'} ${r04.status} (${r04.duration_seconds.toFixed(1)}s)${r04.output ? ` — ${JSON.stringify(r04.output).slice(0, 100)}` : ''}`);
+  console.log(`    ${r04.status === 'success' ? '✓' : '✗'} ${r04.status} (${r04.duration_seconds.toFixed(1)}s)${r04.output ? ` — ${JSON.stringify(r04.output).slice(0, 100)}` : r04.error ? ` — ${r04.error.slice(0, 100)}` : ''}`);
 
   // Relationship Momentum — SQL-only velocity scoring (no LLM)
   console.log('  Relationship momentum scoring...');
@@ -3687,19 +3687,19 @@ export async function runDreamPipeline(
     console.log('  Task 09: Synthesize world narrative (LLM)...');
     const r09 = await task09WorldNarrative(db);
     results.push(r09);
-    console.log(`    ${r09.status === 'success' ? '✓' : '✗'} ${r09.status} (${r09.duration_seconds.toFixed(1)}s)${r09.output ? ` — ${JSON.stringify(r09.output).slice(0, 100)}` : ''}`);
+    console.log(`    ${r09.status === 'success' ? '✓' : '✗'} ${r09.status} (${r09.duration_seconds.toFixed(1)}s)${r09.output ? ` — ${JSON.stringify(r09.output).slice(0, 100)}` : r09.error ? ` — ${r09.error.slice(0, 100)}` : ''}`);
 
     // Task 21: Strategic Question Generator — what can't the system determine alone?
     console.log('  Task 21: Strategic question generator (LLM)...');
     const r21 = await task21QuestionGenerator(db);
     results.push(r21);
-    console.log(`    ${r21.status === 'success' ? '✓' : r21.status === 'skipped' ? '○' : '✗'} ${r21.status} (${r21.duration_seconds.toFixed(1)}s)${r21.output ? ` — ${JSON.stringify(r21.output).slice(0, 120)}` : ''}`);
+    console.log(`    ${r21.status === 'success' ? '✓' : r21.status === 'skipped' ? '○' : '✗'} ${r21.status} (${r21.duration_seconds.toFixed(1)}s)${r21.output ? ` — ${JSON.stringify(r21.output).slice(0, 120)}` : r21.error ? ` — ${r21.error.slice(0, 120)}` : ''}`);
 
     // Task 05: Self-audit — grade OUR OWN work
     console.log('  Task 05: Self-audit...');
     const r05 = await task05SelfAudit(db);
     results.push(r05);
-    console.log(`    ${r05.status === 'success' ? '✓' : r05.status === 'skipped' ? '○' : '✗'} ${r05.status} (${r05.duration_seconds.toFixed(1)}s)${r05.output?.overall_accuracy !== undefined ? ` — accuracy: ${(r05.output.overall_accuracy * 100).toFixed(0)}%` : ''}`);
+    console.log(`    ${r05.status === 'success' ? '✓' : r05.status === 'skipped' ? '○' : '✗'} ${r05.status} (${r05.duration_seconds.toFixed(1)}s)${r05.output?.overall_accuracy !== undefined ? ` — accuracy: ${(r05.output.overall_accuracy * 100).toFixed(0)}%` : r05.error ? ` — ${r05.error.slice(0, 100)}` : ''}`);
   }
 
   // Task 20: Deep Session Trigger — auto-launch deep sessions for stalling projects
@@ -3707,7 +3707,7 @@ export async function runDreamPipeline(
     console.log('  Task 20: Deep session trigger...');
     const r20 = await task20DeepSessionTrigger(db);
     results.push(r20);
-    console.log(`    ${r20.status === 'success' ? '✓' : r20.status === 'skipped' ? '○' : '✗'} ${r20.status} (${r20.duration_seconds.toFixed(1)}s)${r20.output ? ` — ${JSON.stringify(r20.output).slice(0, 150)}` : ''}`);
+    console.log(`    ${r20.status === 'success' ? '✓' : r20.status === 'skipped' ? '○' : '✗'} ${r20.status} (${r20.duration_seconds.toFixed(1)}s)${r20.output ? ` — ${JSON.stringify(r20.output).slice(0, 150)}` : r20.error ? ` — ${r20.error.slice(0, 150)}` : ''}`);
   }
 
   // ── INTELLIGENCE CYCLE — strategic reasoning engine ──────
@@ -3724,7 +3724,7 @@ export async function runDreamPipeline(
       const { runAutonomousResearch } = await import('./research.js');
       const r25 = await runAutonomousResearch(db);
       results.push(r25);
-      console.log(`    ${r25.status === 'success' ? '✓' : r25.status === 'skipped' ? '○' : '✗'} ${r25.status} (${r25.duration_seconds.toFixed(1)}s)`);
+      console.log(`    ${r25.status === 'success' ? '✓' : r25.status === 'skipped' ? '○' : '✗'} ${r25.status} (${r25.duration_seconds.toFixed(1)}s)${r25.error ? ` — ${r25.error.slice(0, 100)}` : ''}`);
       if (r25.status === 'success' && r25.output) {
         console.log(`      Researched ${r25.output.questions_researched}/${r25.output.total_in_queue} questions`);
         for (const f of r25.output.findings || []) {
@@ -3743,7 +3743,7 @@ export async function runDreamPipeline(
       const { extractPlaybooks } = await import('./playbooks.js');
       const r26 = await extractPlaybooks(db);
       results.push(r26);
-      console.log(`    ${r26.status === 'success' ? '✓' : r26.status === 'skipped' ? '○' : '✗'} ${r26.status} (${r26.duration_seconds.toFixed(1)}s)`);
+      console.log(`    ${r26.status === 'success' ? '✓' : r26.status === 'skipped' ? '○' : '✗'} ${r26.status} (${r26.duration_seconds.toFixed(1)}s)${r26.error ? ` — ${r26.error.slice(0, 100)}` : ''}`);
       if (r26.status === 'success' && r26.output?.titles) {
         console.log(`      📋 ${r26.output.playbooks_extracted} playbooks: ${r26.output.titles.join(', ')}`);
       }
