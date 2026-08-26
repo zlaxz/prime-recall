@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from 'crypto';
 
 /**
  * Prime Recall MCP Server
@@ -525,6 +526,33 @@ srv.tool(
     } catch (err: any) {
       return { content: [{ type: "text" as const, text: `Error generating deal brief: ${err.message}` }] };
     }
+  }
+);
+
+srv.tool(
+  "prime_report_issue",
+  "Report a SYSTEM problem to the Mechanic — Prime's autonomous repair agent that reads logs and source code and fixes infrastructure. Use when your own tooling looks wrong: numbers that contradict what you just read (a contact 'cold 140 days' who emailed yesterday), a tool that errors, a source gone stale, data that should exist and doesn't. Describe what you OBSERVED and the EVIDENCE. Do NOT diagnose the cause and do NOT tell the user what to click — the Mechanic investigates within 5 minutes and emails the user its own report. In your brief, say only that you flagged it.",
+  {
+    observation: z.string().describe("What you saw, concretely: which tool/panel, the values, timestamps"),
+    why_wrong: z.string().describe("The evidence that contradicts it (e.g. 'thread:abc shows an email from him dated 2026-08-24')"),
+    agent: z.string().optional().describe("Who is reporting (default 'quinn')"),
+  },
+  async ({ observation, why_wrong, agent }) => {
+    const db = getDb();
+    db.exec(`CREATE TABLE IF NOT EXISTS system_issues (
+      id TEXT PRIMARY KEY, reported_by TEXT, observation TEXT, why_wrong TEXT,
+      status TEXT DEFAULT 'open', result_status TEXT, report_path TEXT,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))`);
+    const dup = db.prepare(
+      "SELECT id, status FROM system_issues WHERE status IN ('open','dispatched') AND observation = ?"
+    ).get(observation) as any;
+    if (dup) {
+      return { content: [{ type: "text", text: `Already filed as issue ${String(dup.id).slice(0, 8)} (status: ${dup.status}). Do not re-report; check for a 'mechanic-report' item instead.` }] };
+    }
+    const id = randomUUID();
+    db.prepare("INSERT INTO system_issues (id, reported_by, observation, why_wrong) VALUES (?, ?, ?, ?)")
+      .run(id, agent || 'quinn', observation, why_wrong);
+    return { content: [{ type: "text", text: `Issue ${id.slice(0, 8)} filed with the Mechanic. It will investigate within 5 minutes and email Zach its report. In your brief, say only: "Flagged [what] to the mechanic." Keep ignoring the suspect data until a mechanic-report says it's fixed.` }] };
   }
 );
 

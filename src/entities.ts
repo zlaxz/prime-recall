@@ -8,7 +8,10 @@ import { getConfig, setConfig } from './db.js';
 
 // ── Name normalization ────────────────────────────────────────
 
-function normalizeName(name: string): string {
+function normalizeName(name: unknown): string {
+  // extraction output occasionally yields objects/arrays here; one bad
+  // name must not abort the whole graph build
+  if (typeof name !== "string") return "";
   return name
     .toLowerCase()
     .replace(/\b(jr|sr|ii|iii|iv|esq|phd|md|dds)\b\.?/gi, '')
@@ -142,7 +145,7 @@ export function mergeEntities(db: Database.Database, fromName: string, toName: s
   for (const m of mentions) {
     try {
       db.prepare('INSERT OR IGNORE INTO entity_mentions (id, entity_id, knowledge_item_id, role, direction, mention_date, source_account) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(uuid(), toEntity.id, m.knowledge_item_id, m.role, m.direction, m.mention_date);
+        .run(uuid(), toEntity.id, m.knowledge_item_id, m.role, m.direction, m.mention_date, m.source_account ?? null);
     } catch (_e) {}
   }
 
@@ -301,7 +304,7 @@ export function buildEntityGraph(
       const direction = meta.waiting_on_user === false ? 'outbound' : (meta.waiting_on_user === true ? 'inbound' : null);
       try {
         db.prepare('INSERT OR IGNORE INTO entity_mentions (id, entity_id, knowledge_item_id, role, direction, mention_date, source_account) VALUES (?, ?, ?, ?, ?, ?, ?)')
-          .run(uuid(), entityId, item.id, 'mentioned', direction, item.source_date);
+          .run(uuid(), entityId, item.id, 'mentioned', direction, item.source_date, item.source_account ?? null);
         stats.mentions++;
       } catch (_e) {}
 
@@ -331,7 +334,7 @@ export function buildEntityGraph(
 
       try {
         db.prepare('INSERT OR IGNORE INTO entity_mentions (id, entity_id, knowledge_item_id, role, direction, mention_date, source_account) VALUES (?, ?, ?, ?, ?, ?, ?)')
-          .run(uuid(), entityId, item.id, 'mentioned', null, item.source_date);
+          .run(uuid(), entityId, item.id, 'mentioned', null, item.source_date, item.source_account ?? null);
         stats.mentions++;
       } catch (_e) {}
 
@@ -403,7 +406,10 @@ export function buildEntityGraph(
   }
 
   // Update graph state
-  const latestDate = items.length > 0 ? items[items.length - 1].source_date : new Date().toISOString();
+  // future-dated calendar items would push the watermark past now and
+  // starve every incremental build until that date arrives
+  const lastItemDate = items.length > 0 ? items[items.length - 1].source_date : null;
+  const latestDate = (lastItemDate && new Date(lastItemDate).getTime() <= Date.now()) ? lastItemDate : new Date().toISOString();
   db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_entity_build', ?, datetime('now'))")
     .run(latestDate);
 

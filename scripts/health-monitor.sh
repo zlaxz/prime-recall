@@ -31,7 +31,7 @@ alert() {
   local hash
   hash=$(echo "$m" | md5 -q)
   if [ ! -f "$ALERT_DIR/$hash" ]; then
-    touch "$ALERT_DIR/$hash"
+    echo "$m" > "$ALERT_DIR/$hash"
     log "ALERT: $m"
     npx tsx scripts/prime-alert.ts "$m" >> "$LOG" 2>&1
   fi
@@ -98,6 +98,20 @@ else
     log "✓ claude-proxy recovered"; clear_alert "claude-proxy not responding"
   else
     alert "claude-proxy not responding (port 3211) — Quinn/PM agents cannot run."
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
+
+# ── 2b. Agents can actually use MCP tools (hourly; the "dark cycles" check) ──
+# A passing proxy ping does NOT prove tools work. Ask for a real tool call.
+if [ "$(date +%M)" -lt 5 ]; then
+  TOOLS=$(curl -s --max-time 150 -X POST http://127.0.0.1:3211/claude \
+    -H "Content-Type: application/json" \
+    -d '{"prompt":"Call the prime_status MCP tool and reply with ONLY the total knowledge item count as a number. If the tool is unavailable reply exactly: NO_TOOLS","timeout":120}' 2>/dev/null)
+  if echo "$TOOLS" | grep -qE '"exit_code":0' && ! echo "$TOOLS" | grep -q "NO_TOOLS" && echo "$TOOLS" | grep -qE '[0-9]{3,}'; then
+    clear_alert "Agents have no MCP tools via proxy — Quinn/PMs are dark"
+  else
+    alert "Agents have no MCP tools via proxy — Quinn/PMs are dark"
     ISSUES=$((ISSUES + 1))
   fi
 fi
@@ -195,6 +209,32 @@ fi
 # ── 8. Tunnel (best-effort restart, no alert) ──────────
 if ! pgrep -f "cloudflared" >/dev/null 2>&1; then
   log "tunnel down — restarting"; restart_daemon "com.prime-recall.tunnel"
+fi
+
+# ── 9. Mechanic dispatch ───────────────────────────────
+# Alerts still present after 15 min (3 checks) are handed to the repair agent;
+# so are issues Quinn filed via prime_report_issue. mechanic.sh has its own
+# single-flight lock and 6h per-issue cooldown, so this is safe to call often.
+MECH="$PRIME_DIR/scripts/mechanic.sh"
+if [ -x "$MECH" ]; then
+  NOW=$(date +%s)
+  for f in "$ALERT_DIR"/*; do
+    [ -f "$f" ] || continue
+    case "$f" in *.dispatched) continue;; esac
+    [ -s "$f" ] || continue                       # legacy empty marker, no message
+    AGE=$(( NOW - $(stat -f %m "$f") ))
+    [ "$AGE" -ge 900 ] || continue
+    if [ -f "$f.dispatched" ] && [ $(( NOW - $(stat -f %m "$f.dispatched") )) -lt 21600 ]; then continue; fi
+    touch "$f.dispatched"
+    log "mechanic ← watchdog: $(head -c 100 "$f")"
+    nohup bash "$MECH" watchdog "$(cat "$f")" >/dev/null 2>&1 &
+  done
+  sqlite3 "$DB" "SELECT id || '|' || observation || ' — evidence: ' || COALESCE(why_wrong,'') FROM system_issues WHERE status='open' ORDER BY created_at ASC LIMIT 3" 2>/dev/null | while IFS='|' read -r IID ITEXT; do
+    [ -n "$IID" ] || continue
+    log "mechanic ← quinn issue ${IID:0:8}: $(echo "$ITEXT" | head -c 100)"
+    nohup bash "$MECH" quinn "$ITEXT" "$IID" >/dev/null 2>&1 &
+    sleep 1
+  done
 fi
 
 if [ "$ISSUES" -eq 0 ]; then
