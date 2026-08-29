@@ -272,7 +272,8 @@ ACCURACY HISTORY:
 ${accuracy ? `Overall: ${Math.round(accuracy.accuracy_rate * 100)}% (${accuracy.total_verified} verified)\nThis run: ${accuracy.this_run?.correct || 0} correct, ${accuracy.this_run?.wrong || 0} wrong` : '(first cycle)'}
 
 ACTIVE LESSONS (${activeLessons.length}):
-${activeLessons.map((l: any) => `- [${l.lesson_type}] ${l.lesson}\n  Rule: ${l.correction_rule || 'none'}`).join('\n') || '(none yet)'}
+${activeLessons.map((l: any) => `- [id: ${l.id}] [${l.lesson_type}] ${l.lesson}\n  Rule: ${l.correction_rule || 'none'}`).join('\n') || '(none yet)'}
+Each lesson above is prefixed with its real "id". To retire a lesson, put that exact id string in "retired_lessons". To mark a new lesson as replacing an old one, put that exact id string in "supersedes_lesson_id". Never invent an id. If a new lesson would restate or only trivially vary an active lesson above, do not add it — retire/consolidate instead and emit zero new_lessons for that topic.
 
 USER FEEDBACK (staged action outcomes):
 ${recentFeedback.map((f: any) => `- [${f.status}] ${f.type}: ${f.summary}`).join('\n') || '(none)'}
@@ -319,8 +320,28 @@ Return JSON:
 
     const reflection = JSON.parse(objMatch[0]);
 
+    // Full active set (not the 15-item prompt window) for a code-level dedup check —
+    // prompt-level "don't repeat yourself" instructions have repeatedly failed to stop
+    // near-duplicate lessons (e.g. the "HARD STOP" pattern), so this is enforced here
+    // regardless of what the model does.
+    const dedupCandidates = db.prepare(
+      "SELECT id, lesson, lesson_type FROM strategic_lessons WHERE superseded_by IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))"
+    ).all() as any[];
+
+    const significantWords = (s: string) => new Set(
+      (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 3)
+    );
+    const similarity = (a: string, b: string) => {
+      const wa = significantWords(a), wb = significantWords(b);
+      if (wa.size === 0 || wb.size === 0) return 0;
+      let overlap = 0;
+      for (const w of wa) if (wb.has(w)) overlap++;
+      return overlap / Math.min(wa.size, wb.size);
+    };
+
     // Insert new lessons
     let lessonsAdded = 0;
+    let lessonsSkippedDup = 0;
     for (const lesson of (reflection.new_lessons || [])) {
       // Skip self-fulfilling lessons unless flagged as safe
       if (lesson.self_fulfilling_risk) {
@@ -328,15 +349,26 @@ Return JSON:
         continue;
       }
 
+      const dup = dedupCandidates.find(l => l.lesson_type === lesson.lesson_type && similarity(l.lesson, lesson.lesson) > 0.6);
+      if (dup) {
+        console.log(`    ⚠ Skipped near-duplicate lesson (matches active ${dup.id}): "${(lesson.lesson || '').slice(0, 80)}"`);
+        lessonsSkippedDup++;
+        continue;
+      }
+
+      const newId = uuid();
       db.prepare(`
         INSERT INTO strategic_lessons (id, lesson_date, lesson_type, lesson, domain, root_cause, severity, correction_rule, superseded_by)
         VALUES (?, date('now'), ?, ?, ?, ?, ?, ?, ?)
-      `).run(uuid(), lesson.lesson_type, lesson.lesson, lesson.domain, lesson.root_cause, lesson.severity, lesson.correction_rule, null);
+      `).run(newId, lesson.lesson_type, lesson.lesson, lesson.domain, lesson.root_cause, lesson.severity, lesson.correction_rule, null);
+      dedupCandidates.push({ id: newId, lesson: lesson.lesson, lesson_type: lesson.lesson_type });
 
-      // Handle superseding
+      // Handle superseding: the OLD lesson (supersedes_lesson_id) is marked as
+      // superseded by this NEW row's id — previously both args were the same value,
+      // which pointed a lesson's superseded_by at its own id instead of the new lesson.
       if (lesson.supersedes_lesson_id) {
         db.prepare("UPDATE strategic_lessons SET superseded_by = ? WHERE id = ?")
-          .run(lesson.supersedes_lesson_id, lesson.supersedes_lesson_id);
+          .run(newId, lesson.supersedes_lesson_id);
       }
       lessonsAdded++;
     }
@@ -361,7 +393,7 @@ Return JSON:
       task: '16-strategic-reflection',
       status: 'success',
       duration_seconds: (Date.now() - start) / 1000,
-      output: { lessons_added: lessonsAdded, meta_insight: reflection.meta_insight, calibration: reflection.calibration?.direction },
+      output: { lessons_added: lessonsAdded, lessons_skipped_dup: lessonsSkippedDup, meta_insight: reflection.meta_insight, calibration: reflection.calibration?.direction },
     };
   } catch (err: any) {
     return { task: '16-strategic-reflection', status: 'failed', duration_seconds: (Date.now() - start) / 1000, error: err.message };
