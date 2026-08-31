@@ -54,6 +54,26 @@ async function tick() {
     console.log(`[shift]   Sync error: ${err.message?.slice(0, 60)}`);
   }
 
+  // ── DAILY EMAIL — tick-level, independent of the 4h cycle (audit fix) ──
+  // Fires on the first tick at/after 7:30 local; window extends to 12:59 so a
+  // crashed/blocked morning cycle still gets a late brief instead of none.
+  try {
+    const lastEmailRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_quinn_email'").get() as any)?.value;
+    const lastEmail = lastEmailRaw ? new Date(JSON.parse(lastEmailRaw)).getTime() : 0;
+    const hoursSinceEmail = (Date.now() - lastEmail) / 3600000;
+    const hr = now.getHours(), mn = now.getMinutes();
+    if (hoursSinceEmail > 20 && (hr > 7 || (hr === 7 && mn >= 30)) && hr <= 12) {
+      const { sendDailyIntelligenceEmail } = await import('./daily-email.js');
+      const sent = await sendDailyIntelligenceEmail(db);
+      if (sent) {
+        db.prepare(
+          "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_quinn_email', ?, datetime('now'))"
+        ).run(JSON.stringify(new Date().toISOString()));
+        console.log('[shift]   Quinn daily email sent');
+      }
+    }
+  } catch (e) {}
+
   // ── HOURLY: Meeting prep + commitment checks ──
   const lastHourlyRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_hourly_check'").get() as any)?.value;
   const lastHourly = lastHourlyRaw ? new Date(JSON.parse(lastHourlyRaw)).getTime() : 0;
@@ -238,28 +258,8 @@ async function tick() {
     }
     logMem('post-research');
 
-    // Send DAILY intelligence email via Quinn — ONCE per day, morning only
-    try {
-      const lastEmailRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_quinn_email'").get() as any)?.value;
-      const lastEmail = lastEmailRaw ? new Date(JSON.parse(lastEmailRaw)).getTime() : 0;
-      const hoursSinceEmail = (Date.now() - lastEmail) / 3600000;
-      const currentHour = new Date().getHours();
-
-      // Only send if: >20 hours since last email AND it's between 6-9am
-      const currentMin = new Date().getMinutes();
-      // Pinned to first tick at/after 7:30 — a predictable arrival time builds
-      // the reading habit; "whenever the cycle runs" does not (ADHD UX).
-      if (hoursSinceEmail > 20 && (currentHour > 7 || (currentHour === 7 && currentMin >= 30)) && currentHour <= 10) {
-        const { sendDailyIntelligenceEmail } = await import('./daily-email.js');
-        const sent = await sendDailyIntelligenceEmail(db);
-        if (sent) {
-          db.prepare(
-            "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_quinn_email', ?, datetime('now'))"
-          ).run(JSON.stringify(new Date().toISOString()));
-          console.log('[shift]   Quinn daily email sent');
-        }
-      }
-    } catch (e) {}
+    // (daily email moved to tick level — audit 2026-08-31: nested inside the
+    // 4h gate, a crashed morning cycle silently cancelled the brief for the day)
 
     // (last_full_cycle was stamped at the START of this block — see above)
 

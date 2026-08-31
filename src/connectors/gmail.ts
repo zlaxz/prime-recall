@@ -624,9 +624,18 @@ export async function scanSentMail(
     const sourceRef = `thread:${td.id}`;
     let existing = db.prepare('SELECT id, metadata, tags FROM knowledge WHERE source_ref = ?').get(sourceRef) as any;
     if (!existing && td.subject) {
-      // Fallback: match by subject in inbox items
-      existing = db.prepare('SELECT id, metadata, tags FROM knowledge WHERE source = ? AND title LIKE ? ORDER BY source_date DESC LIMIT 1')
-        .get('gmail', `%${td.subject.replace(/^(Re:|Fwd:)\s*/gi, '').trim().slice(0, 50)}%`) as any;
+      // Fallback: match by subject in inbox items. Guarded (audit 2026-08-31):
+      // escape LIKE wildcards, require a distinctive subject, and skip when
+      // ambiguous — clearing waiting_on_user on the WRONG thread silently
+      // drops a genuinely-owed reply from the ball lists.
+      const stripped = td.subject.replace(/^(Re:|Fwd:)\s*/gi, '').trim().slice(0, 50);
+      if (stripped.length >= 20) {
+        const escaped = stripped.replace(/([%_\\])/g, '\\$1');
+        const matches = db.prepare("SELECT id, metadata, tags FROM knowledge WHERE source = 'gmail' AND title LIKE ? ESCAPE '\\' ORDER BY source_date DESC LIMIT 2")
+          .all(`%${escaped}%`) as any[];
+        if (matches.length === 1) existing = matches[0];
+        // 2 matches = ambiguous fallback — do nothing rather than guess
+      }
     }
 
     if (existing && td.userSentLast) {
@@ -673,8 +682,20 @@ export async function scanSentMail(
     if (existing.source === 'gmail' && td.lastDate) {
       const kbDate = new Date(existing.source_date).getTime();
       const threadDate = new Date(td.lastDate).getTime();
-      if (threadDate > kbDate + 60000) { // Thread is newer by >1 min
-        return true; // Will upsert via insertKnowledge (source_ref match)
+      if (threadDate > kbDate + 60000) {
+        // light-touch UPDATE (audit 2026-08-31): recreating via insertKnowledge
+        // REPLACEd the rich extraction with a snippet row, nulled raw_content/
+        // created_at, and flipped source to gmail-sent — permanently removing
+        // the thread from ball-list queries. Refresh in place instead.
+        try {
+          const row = db.prepare('SELECT metadata FROM knowledge WHERE id = ?').get(existing.id) as any;
+          const meta = typeof row?.metadata === 'string' ? JSON.parse(row.metadata) : (row?.metadata || {});
+          const newMeta = { ...meta, waiting_on_user: false, user_replied: true, last_from: td.lastFrom,
+            replied_at: new Date(td.lastDate).toISOString() };
+          db.prepare("UPDATE knowledge SET source_date = ?, metadata = ?, updated_at = datetime('now') WHERE id = ?")
+            .run(new Date(td.lastDate).toISOString(), JSON.stringify(newMeta), existing.id);
+        } catch {}
+        return false;
       }
     }
     return false;

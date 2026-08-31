@@ -86,7 +86,7 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
       const lines: string[] = [];
       try {
         const cleared = db.prepare(
-          "SELECT title, monitor FROM ledger WHERE status='resolved' AND updated_at >= datetime('now','-1 day')"
+          "SELECT title, monitor FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-1 day')"
         ).all() as any[];
         if (cleared.length) {
           lines.push('CLEARED since yesterday:');
@@ -101,7 +101,9 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
         if (openActs.n || queued.n) {
           lines.push(`ACTIONS: ${openActs.n} open in your inbox${queued.n ? `, ${queued.n} queued` : ''}`);
         }
-        const monitors = (db.prepare("SELECT COUNT(*) n FROM pm_agents WHERE active=1").get() as any)?.n ?? '?';
+        // actual completions in 24h, not roster size — the heartbeat must not
+        // read "7 monitors ran" on a morning when zero did (audit finding)
+        const monitors = (db.prepare("SELECT COUNT(*) n FROM agent_state WHERE agent_type='pm' AND last_run_at >= datetime('now','-1 day')").get() as any)?.n ?? '?';
         const mech = db.prepare(
           "SELECT COUNT(*) n FROM knowledge WHERE source='mechanic-report' AND created_at >= datetime('now','-1 day')"
         ).get() as any;
