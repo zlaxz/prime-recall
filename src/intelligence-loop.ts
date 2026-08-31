@@ -236,9 +236,46 @@ Return JSON array:
 
 // ── Task 16: Strategic Reflection ────────────────────────
 
+const significantWords = (s: string) => new Set(
+  (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 3)
+);
+const lessonSimilarity = (a: string, b: string) => {
+  const wa = significantWords(a), wb = significantWords(b);
+  if (wa.size === 0 || wb.size === 0) return 0;
+  let overlap = 0;
+  for (const w of wa) if (wb.has(w)) overlap++;
+  return overlap / Math.min(wa.size, wb.size);
+};
+
 export async function task16StrategicReflection(db: Database.Database): Promise<TaskResult> {
   const start = Date.now();
   try {
+    // Self-heal pass: collapse near-duplicate lessons within the SAME prompt window used
+    // below (ORDER BY created_at DESC LIMIT 15), before anything else runs. The insert-time
+    // dedup check further down only stops NEW duplicates from being written — it does nothing
+    // about duplicates that already exist (e.g. the 15-row "HARD STOP" cluster from before
+    // that check existed on 2026-08-29). Left unaddressed, a cluster this size permanently
+    // fills the entire prompt window, so the model never sees anything but stale noise and
+    // has no fresh signal to retire it from (retirement is only ever triggered when the model
+    // tries to add a lesson that would restate one already shown to it). Scoped to just the
+    // 15-row window — not the full active history — so this can't mass-retire older, more
+    // varied lessons on a crude word-overlap heuristic.
+    const windowForSelfHeal = db.prepare(
+      "SELECT id, lesson, lesson_type FROM strategic_lessons WHERE superseded_by IS NULL AND (expires_at IS NULL OR expires_at > datetime('now')) ORDER BY created_at DESC LIMIT 15"
+    ).all().reverse() as any[]; // oldest-first so the earliest instance of a repeated lesson is the one kept
+    const keptForSelfHeal: any[] = [];
+    const selfHealRetireIds: string[] = [];
+    for (const l of windowForSelfHeal) {
+      const dup = keptForSelfHeal.find(k => k.lesson_type === l.lesson_type && lessonSimilarity(k.lesson, l.lesson) > 0.6);
+      if (dup) selfHealRetireIds.push(l.id);
+      else keptForSelfHeal.push(l);
+    }
+    if (selfHealRetireIds.length > 0) {
+      const retireStmt = db.prepare("UPDATE strategic_lessons SET superseded_by = 'retired_dup', expires_at = datetime('now') WHERE id = ?");
+      for (const id of selfHealRetireIds) retireStmt.run(id);
+      console.log(`    ⚠ Self-healed ${selfHealRetireIds.length} near-duplicate lesson(s) in the active prompt window`);
+    }
+
     // Load prediction errors
     const errorsRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'prediction_errors_latest'").get() as any)?.value;
     const errors = errorsRaw ? JSON.parse(errorsRaw) : [];
@@ -249,7 +286,7 @@ export async function task16StrategicReflection(db: Database.Database): Promise<
 
     // Need at least some data to reflect on
     if (errors.length === 0 && (!accuracy || accuracy.total_verified < 3)) {
-      return { task: '16-strategic-reflection', status: 'skipped', duration_seconds: 0, output: { message: 'Insufficient prediction history for reflection' } };
+      return { task: '16-strategic-reflection', status: 'skipped', duration_seconds: 0, output: { message: 'Insufficient prediction history for reflection', self_healed_duplicates: selfHealRetireIds.length } };
     }
 
     // Load active lessons
@@ -328,17 +365,6 @@ Return JSON:
       "SELECT id, lesson, lesson_type FROM strategic_lessons WHERE superseded_by IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))"
     ).all() as any[];
 
-    const significantWords = (s: string) => new Set(
-      (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 3)
-    );
-    const similarity = (a: string, b: string) => {
-      const wa = significantWords(a), wb = significantWords(b);
-      if (wa.size === 0 || wb.size === 0) return 0;
-      let overlap = 0;
-      for (const w of wa) if (wb.has(w)) overlap++;
-      return overlap / Math.min(wa.size, wb.size);
-    };
-
     // Insert new lessons
     let lessonsAdded = 0;
     let lessonsSkippedDup = 0;
@@ -349,7 +375,7 @@ Return JSON:
         continue;
       }
 
-      const dup = dedupCandidates.find(l => l.lesson_type === lesson.lesson_type && similarity(l.lesson, lesson.lesson) > 0.6);
+      const dup = dedupCandidates.find(l => l.lesson_type === lesson.lesson_type && lessonSimilarity(l.lesson, lesson.lesson) > 0.6);
       if (dup) {
         console.log(`    ⚠ Skipped near-duplicate lesson (matches active ${dup.id}): "${(lesson.lesson || '').slice(0, 80)}"`);
         lessonsSkippedDup++;
