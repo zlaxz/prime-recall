@@ -206,6 +206,24 @@ else
   clear_alert "Low disk space on Mac Mini"
 fi
 
+# ── 7b. DeepSeek API balance ────────────────────────────
+# wiki-compiler.ts + verification.ts run inside the 4h shift cycle and
+# swallow DeepSeek errors into a one-line log ("Wiki compilation failed:
+# 402 Insufficient Balance") — no other check here covers that, so a
+# depleted balance degraded silently for two weeks (see system_issues
+# f52d1cdb). Hits DeepSeek's own balance endpoint directly instead of
+# scraping logs, so it catches the problem before the next 4h cycle runs.
+DS_KEY=$(grep '^DEEPSEEK_API_KEY=' "$PRIME_DIR/.env" 2>/dev/null | cut -d= -f2-)
+if [ -n "$DS_KEY" ]; then
+  DS_BAL=$(curl -s --max-time 10 https://api.deepseek.com/user/balance -H "Authorization: Bearer $DS_KEY" 2>/dev/null)
+  if echo "$DS_BAL" | grep -q '"is_available":true'; then
+    clear_alert "DeepSeek API balance depleted — wiki compilation/verification failing silently."
+  else
+    alert "DeepSeek API balance depleted (is_available=false) — wiki compilation and claim verification are failing silently every 4h shift cycle. Top up at platform.deepseek.com."
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
+
 # ── 8. Tunnel (best-effort restart, no alert) ──────────
 if ! pgrep -f "cloudflared" >/dev/null 2>&1; then
   log "tunnel down — restarting"; restart_daemon "com.prime-recall.tunnel"
