@@ -180,6 +180,19 @@ if issue_id:
 con.commit()
 PY
 
+# ── close other issues the agent verified as already resolved ──
+python3 - "$DB" "$WORK/report.md" <<'PY'
+import sqlite3, sys, re
+db, path = sys.argv[1:3]
+r = open(path).read()
+m = re.search(r"^RESOLVED_ISSUES:\s*([0-9a-f, ]+)$", r, re.M)
+if not m: sys.exit(0)
+con = sqlite3.connect(db)
+for short in [x.strip() for x in m.group(1).split(",") if x.strip()]:
+    con.execute("UPDATE system_issues SET status='resolved', result_status='verified-by-mechanic', updated_at=datetime('now') WHERE id LIKE ? || '%' AND status IN ('open','dispatched')", (short,))
+con.commit()
+PY
+
 # ── file anything the agent "also noticed" as new issues ──
 python3 - "$DB" "$WORK/report.md" <<'PY'
 import sqlite3, sys, uuid, re
