@@ -81,6 +81,14 @@ async function tick() {
   if (Date.now() - lastHourly > HOUR_MS) {
     console.log(`[shift]   Running hourly checks...`);
 
+    // Command Center export — living TODAY.md/LEDGER.md for laptop surfaces
+    try {
+      const { exportCommandCenter } = await import('./export-command-center.js');
+      exportCommandCenter(db);
+    } catch (err: any) {
+      console.log('[shift]   Command Center export failed: ' + (err.message || '').slice(0, 60));
+    }
+
     // Ledger → [ACT]/[REMIND] emails to Zach (scarcity-capped; drafts only, he sends)
     try {
       const { dispatchLedger } = await import('./ledger.js');
