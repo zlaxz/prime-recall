@@ -636,6 +636,29 @@ srv.tool(
 );
 
 srv.tool(
+  "prime_retire_monitor",
+  "Retire (deactivate) a standing monitor whose situation has concluded or gone dormant — resolved claims, closed deals, domains quiet for 3+ weeks with no open ledger items. The agent's files and wiki are KEPT; it simply stops running, freeing a roster slot (cap 8). Announce it in your next brief: 'Retired the X monitor (reason) — say \'bring it back\' to reverse.' Reactivate later via prime_create_monitor with the same name.",
+  {
+    agent_id: z.string().describe("The monitor's agent_id, e.g. 'behrends-claims-pm'"),
+    reason: z.string().describe("One line: why it's being retired (concluded / dormant / superseded)"),
+  },
+  async ({ agent_id, reason }) => {
+    const db = getDb();
+    const row = db.prepare("SELECT agent_id, project, active FROM pm_agents WHERE agent_id = ?").get(agent_id) as any;
+    if (!row) return { content: [{ type: "text" as const, text: `No monitor '${agent_id}' on the roster.` }] };
+    if (!row.active) return { content: [{ type: "text" as const, text: `'${agent_id}' is already retired.` }] };
+    const openItems = (db.prepare("SELECT COUNT(*) n FROM ledger WHERE monitor = ? AND status = 'open' AND tier IN ('act','remind')").get(agent_id) as any).n;
+    if (openItems > 0) {
+      return { content: [{ type: "text" as const, text: `Not retired: '${agent_id}' still has ${openItems} open act/remind ledger item(s). Resolve or dismiss them first, or retire anyway by dismissing them yourself — a monitor with live obligations should not silently vanish.` }] };
+    }
+    db.prepare("UPDATE pm_agents SET active = 0 WHERE agent_id = ?").run(agent_id);
+    db.prepare("INSERT INTO knowledge (id, title, summary, source, source_ref, source_date, created_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))")
+      .run(randomUUID(), `Monitor retired: ${row.project}`, `${agent_id} retired. Reason: ${reason}. Files kept; reactivate via prime_create_monitor with the same name.`, 'agent-notification', `retire:${agent_id}`);
+    return { content: [{ type: "text" as const, text: `✓ '${agent_id}' retired (${reason}). Files kept. Announce in your next brief: "Retired the ${row.project} monitor — ${reason}. Say 'bring it back' to reverse."` }] };
+  }
+);
+
+srv.tool(
   "prime_notify",
   "Send a notification to the user. Routes by urgency: CRITICAL → iMessage + email, HIGH → iMessage, NORMAL → email, FYI → save only. Use when an agent has something important to communicate.",
   {
