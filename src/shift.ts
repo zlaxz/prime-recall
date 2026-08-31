@@ -246,7 +246,10 @@ async function tick() {
       const currentHour = new Date().getHours();
 
       // Only send if: >20 hours since last email AND it's between 6-9am
-      if (hoursSinceEmail > 20 && currentHour >= 6 && currentHour <= 9) {
+      const currentMin = new Date().getMinutes();
+      // Pinned to first tick at/after 7:30 — a predictable arrival time builds
+      // the reading habit; "whenever the cycle runs" does not (ADHD UX).
+      if (hoursSinceEmail > 20 && (currentHour > 7 || (currentHour === 7 && currentMin >= 30)) && currentHour <= 10) {
         const { sendDailyIntelligenceEmail } = await import('./daily-email.js');
         const sent = await sendDailyIntelligenceEmail(db);
         if (sent) {

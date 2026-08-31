@@ -30,7 +30,7 @@ function cfg(key: string, def = ''): string {
 const email = cfg('alert_email', 'zach.stock@recaptureinsurance.com');
 const smsGateway = cfg('alert_sms_gateway', ''); // e.g. 15551234567@vtext.com
 const imessage = cfg('alert_imessage', 'zach.stock@recaptureinsurance.com'); // handle or +1number; '' to disable
-const subject = `[PRIME HEALTH] ${msg.slice(0, 70)}`;
+const subject = `[SYSTEM] ${msg.slice(0, 70)}`;
 
 // iMessage via Messages.app. Works only when invoked from a GUI-session process
 // (the com.prime.health LaunchAgent is one). execFileSync = no shell, so the only

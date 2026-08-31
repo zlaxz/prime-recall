@@ -240,6 +240,13 @@ con.commit()
 PY
 
 # ── deliver to Zach ─────────────────────────────────────
+# FIXED runs fold into the morning brief's SYSTEM line (report + knowledge
+# row still saved) — only exceptions that need Zach earn an interrupt.
+if [ "$STATUS" = "FIXED" ]; then
+  log "FIXED — no email (brief carries it)"
+  rm -rf "$WORK"
+  exit 0
+fi
 MSG="MECHANIC $STATUS — $HEADLINE
 
 Issue ($SOURCE): ${ISSUE:0:300}

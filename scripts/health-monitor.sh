@@ -179,6 +179,33 @@ print(int((datetime.now(timezone.utc) - last).total_seconds() / 3600))
   fi
 fi
 
+# ── 4b. Morning brief actually went out ────────────────
+# The brief is Zach's single surface — if it silently fails, a broken day
+# looks identical to a quiet one. Alert if nothing sent by 8am local.
+MSG_NOBRIEF="Morning brief did not go out by 8am — daily email pipeline is broken."
+HOUR_NOW=$(date +%H)
+if [ "$HOUR_NOW" -ge 8 ] && [ "$HOUR_NOW" -lt 22 ]; then
+  LAST_QE=$(sqlite3 "$DB" "SELECT value FROM graph_state WHERE key='last_quinn_email'" 2>/dev/null | tr -d '"')
+  TODAY_LOCAL=$(date +%Y-%m-%d)
+  SENT_DAY=$(python3 -c "
+from datetime import datetime, timezone
+import sys
+try:
+    d = datetime.fromisoformat('${LAST_QE}'.replace('Z','+00:00'))
+    print(d.astimezone().strftime('%Y-%m-%d'))
+except Exception:
+    print('never')
+" 2>/dev/null)
+  if [ "$SENT_DAY" = "$TODAY_LOCAL" ]; then
+    clear_alert "$MSG_NOBRIEF"
+  else
+    alert "$MSG_NOBRIEF"
+    ISSUES=$((ISSUES + 1))
+  fi
+else
+  clear_alert "$MSG_NOBRIEF"
+fi
+
 # ── 5. Source sync freshness ───────────────────────────
 check_sync() {  # source  max_hours
   local LAST MSG

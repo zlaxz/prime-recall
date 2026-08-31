@@ -56,6 +56,7 @@ export function ensureLedger(db: Database.Database): void {
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE(monitor, item)
   )`);
+  try { db.exec("ALTER TABLE ledger ADD COLUMN notified_thread_id TEXT"); } catch {}
 }
 
 // LLM output → clean scalar. Headers and single-line fields must never
@@ -226,9 +227,18 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
       SELECT * FROM ledger WHERE tier='act' AND status='open' AND notified_at IS NULL
       ORDER BY deadline IS NULL, deadline, ball_since LIMIT ?
     `).all(room) as any[];
+    let slot = openNotified;
     for (const r of candidates) {
-      const res = await sendEmail(db, { to, subject: subj(`[ACT] ${r.title}`), body: body(r, false) });
-      if (res.success) { db.prepare("UPDATE ledger SET notified_at=datetime('now') WHERE id=?").run(r.id); sent++; }
+      slot++;
+      // Subject carries the whole decision context — countdown, not date
+      // (time-blindness), and the slot so scarcity is visible at a glance.
+      const left = r.deadline ? Math.max(0, Math.ceil((new Date(r.deadline).getTime() - Date.now()) / 86400000)) : null;
+      const tag = left !== null ? `[ACT ${slot}/${MAX_OPEN_ACT} · ${left}d left]` : `[ACT ${slot}/${MAX_OPEN_ACT}]`;
+      const res = await sendEmail(db, { to, subject: subj(`${tag} ${r.title}`), body: body(r, false) });
+      if (res.success) {
+        db.prepare("UPDATE ledger SET notified_at=datetime('now'), notified_thread_id=? WHERE id=?").run(res.threadId || null, r.id);
+        sent++;
+      }
     }
   }
 
@@ -238,7 +248,8 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
       AND notified_at IS NOT NULL AND notified_at <= datetime('now', ?)
   `).all(`-${BUMP_AFTER_HOURS} hours`) as any[];
   for (const r of stale) {
-    const res = await sendEmail(db, { to, subject: subj(`[ACT — bump] ${r.title}`), body: body(r, true) });
+    // Reply in the original email's thread — one item, one Gmail thread
+    const res = await sendEmail(db, { to, subject: subj(`[ACT — bump] ${r.title}`), body: body(r, true), replyToThreadId: r.notified_thread_id || undefined });
     if (res.success) {
       db.prepare("UPDATE ledger SET bumped_at=datetime('now'), tier='brief' WHERE id=?").run(r.id);
       bumped++;
@@ -254,7 +265,8 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
       ORDER BY date(deadline) LIMIT ?
     `).all(remindRoom) as any[];
     for (const r of reminders) {
-      const res = await sendEmail(db, { to, subject: subj(`[REMIND] ${r.title} — due ${r.deadline}`), body: body(r, false) });
+      const left = Math.max(0, Math.ceil((new Date(r.deadline).getTime() - Date.now()) / 86400000));
+      const res = await sendEmail(db, { to, subject: subj(`[REMIND · ${left}d] ${r.title} (due ${r.deadline})`), body: body(r, false) });
       if (res.success) { db.prepare("UPDATE ledger SET notified_at=datetime('now') WHERE id=?").run(r.id); sent++; }
     }
   }
