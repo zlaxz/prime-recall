@@ -57,6 +57,7 @@ export function ensureLedger(db: Database.Database): void {
     UNIQUE(monitor, item)
   )`);
   try { db.exec("ALTER TABLE ledger ADD COLUMN notified_thread_id TEXT"); } catch {}
+  try { db.exec("ALTER TABLE ledger ADD COLUMN links TEXT"); } catch {}
 }
 
 // LLM output → clean scalar. Headers and single-line fields must never
@@ -81,11 +82,11 @@ const oneLine = (v: unknown, max = 200): string | null => {
 export function upsertLedgerRows(db: Database.Database, monitor: string, rows: LedgerRow[]): number {
   ensureLedger(db);
   const up = db.prepare(`
-    INSERT INTO ledger (id, monitor, item, title, counterparty, state, ball, ball_since, deadline, next_action, draft, tier, status)
-    VALUES (@id, @monitor, @item, @title, @counterparty, @state, @ball, @ball_since, @deadline, @next_action, @draft, @tier, @status)
+    INSERT INTO ledger (id, monitor, item, title, counterparty, state, ball, ball_since, deadline, next_action, draft, tier, status, links)
+    VALUES (@id, @monitor, @item, @title, @counterparty, @state, @ball, @ball_since, @deadline, @next_action, @draft, @tier, @status, @links)
     ON CONFLICT(monitor, item) DO UPDATE SET
       title=@title, counterparty=@counterparty, state=@state, ball=@ball, ball_since=@ball_since,
-      deadline=@deadline, next_action=@next_action, draft=@draft, tier=@tier, status=@status,
+      deadline=@deadline, next_action=@next_action, draft=@draft, tier=@tier, status=@status, links=@links,
       notified_at = CASE WHEN ledger.status <> 'open' AND @status = 'open' THEN NULL ELSE ledger.notified_at END,
       bumped_at   = CASE WHEN ledger.status <> 'open' AND @status = 'open' THEN NULL ELSE ledger.bumped_at END,
       updated_at=datetime('now')
@@ -110,11 +111,21 @@ export function upsertLedgerRows(db: Database.Database, monitor: string, rows: L
       const ball_since = oneLine(r.ball_since, 40);
       // act requires a finished draft and a time anchor — else demote
       if (tier === 'act' && (!draft || !(deadline || ball_since))) tier = deadline ? 'remind' : 'brief';
+      // resources: [{label, url}] — gmail deep links, drive files, portals
+      let linksJson: string | null = null;
+      const rawLinks = (r as any).links;
+      if (Array.isArray(rawLinks)) {
+        const clean = rawLinks
+          .filter((l: any) => l && typeof l.url === 'string' && /^https?:\/\//.test(l.url.trim()))
+          .slice(0, 6)
+          .map((l: any) => ({ label: oneLine(l.label, 80) || 'link', url: l.url.trim().replace(/[\r\n\s]+/g, '') }));
+        if (clean.length) linksJson = JSON.stringify(clean);
+      }
       return {
         id: uuid(), monitor, item: oneLine(r.item, 120)!, title: oneLine(r.title, 200)!,
         counterparty: oneLine(r.counterparty), state: oneLine(r.state, 300), ball: ball || null,
         ball_since, deadline, next_action: oneLine(r.next_action, 400), draft,
-        tier, status,
+        tier, status, links: linksJson,
       };
     });
 
@@ -224,6 +235,13 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
     '',
     r.next_action ? `DO THIS: ${r.next_action}` : null,
     r.draft ? `\n--- READY-TO-SEND DRAFT (send from your own account) ---\n${r.draft}\n---` : null,
+    (() => {
+      try {
+        const ls = r.links ? JSON.parse(r.links) : [];
+        if (!ls.length) return null;
+        return '\nRESOURCES:\n' + ls.map((l: any) => `  • ${l.label}: ${l.url}`).join('\n');
+      } catch { return null; }
+    })(),
     '',
     'No reply needed — when you act, the monitor sees your sent mail and closes this out.',
     'To drop it: tell Quinn or Claude to dismiss it.',
