@@ -617,6 +617,25 @@ srv.tool(
 );
 
 srv.tool(
+  "prime_read_attachment",
+  "Read the CONTENTS of an email attachment on demand (PDF/doc/docx/rtf/txt/csv). Attachment index cards appear in search results as source 'attachment-index' with a message_id and filename in their summary/metadata. Use this when a task needs what a document actually SAYS — a policy dec page, a signed agreement, loss runs, a filing. Bytes are fetched live from Gmail and extracted; nothing is stored. Scanned PDFs without a text layer return a clear note instead of text.",
+  {
+    message_id: z.string().describe("Gmail message id from the attachment-index card"),
+    filename: z.string().describe("Attachment filename (exact or partial match)"),
+  },
+  async ({ message_id, filename }) => {
+    const db = getDb();
+    const { readAttachment } = await import('../attachments.js');
+    try {
+      const text = await readAttachment(db, message_id, filename);
+      return { content: [{ type: "text" as const, text }] };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Attachment read failed: ${(e.message || '').slice(0, 200)}` }] };
+    }
+  }
+);
+
+srv.tool(
   "prime_notify",
   "Send a notification to the user. Routes by urgency: CRITICAL → iMessage + email, HIGH → iMessage, NORMAL → email, FYI → save only. Use when an agent has something important to communicate.",
   {

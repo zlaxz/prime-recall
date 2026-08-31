@@ -152,6 +152,16 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
     console.log('  Sent-mail scan failed: ' + (err.message || '').slice(0, 80));
   }
 
+  // Attachment INDEX CARDS only (library metaphor): filename/sender/thread ids,
+  // never content. Bytes fetched on demand via prime_read_attachment.
+  try {
+    const { indexAttachments } = await import('../attachments.js');
+    const att = await indexAttachments(db, { days: 2, max: 40 });
+    if (att.indexed) console.log(`  Attachments: ${att.indexed} new index cards (${att.scanned} messages scanned)`);
+  } catch (err: any) {
+    console.log('  Attachment index failed: ' + (err.message || '').slice(0, 80));
+  }
+
     // ── TEAM MEMBER SYNC (via service account) ──
   // Sync Gmail + Calendar for non-CEO team members using domain-wide delegation
   try {
