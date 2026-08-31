@@ -140,12 +140,17 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
     }
   }
 
-  // Gmail Sent — DISABLED. scanSentMail is OAuth-only and the OAuth tokens were
-  // bound to quinn@ (the system email), not Zach's inbox — using it caused 10
-  // days of email to be ingested against the wrong account. Re-enable only after
-  // scanSentMail is updated to support service-account auth (feedback memory:
-  // gmail_service_account). Service-account Gmail scan above already covers
-  // received-mail; sent-mail correction tags are deferred.
+  // Gmail Sent — re-enabled 2026-08-31: scanSentMail now uses the service
+  // account impersonating Zach's mailbox (the OAuth-bound-to-quinn@ bug is
+  // gone). Incremental 2-day window per tick. This is what makes ledger
+  // closure-by-observation real: monitors see Zach's actual sent mail.
+  try {
+    const { scanSentMail } = await import('./gmail.js');
+    const sent = await scanSentMail(db, { days: 2, maxThreads: 50 });
+    if (sent.newItems || sent.corrected) console.log(`  Sent-mail: ${sent.newItems} new, ${sent.corrected} corrected`);
+  } catch (err: any) {
+    console.log('  Sent-mail scan failed: ' + (err.message || '').slice(0, 80));
+  }
 
     // ── TEAM MEMBER SYNC (via service account) ──
   // Sync Gmail + Calendar for non-CEO team members using domain-wide delegation

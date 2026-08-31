@@ -469,31 +469,15 @@ export async function scanSentMail(
   const days = options.days || 90;
   const maxThreads = options.maxThreads || 300;
 
-  const tokens = getConfig(db, 'gmail_tokens');
-  if (!tokens) throw new Error('Gmail not connected. Run: recall connect gmail');
-
-  const clientId = CLIENT_ID || getConfig(db, 'google_client_id') || '';
-  const clientSecret = CLIENT_SECRET || getConfig(db, 'google_client_secret') || '';
-  if (!clientId || !clientSecret) throw new Error('Google OAuth credentials missing.');
-
-  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI);
-  oauth2Client.setCredentials(tokens);
-
-  // Refresh token
-  oauth2Client.on('tokens', (newTokens) => {
-    const current = getConfig(db, 'gmail_tokens');
-    setConfig(db, 'gmail_tokens', { ...current, ...newTokens });
-  });
-  try {
-    const { credentials } = await oauth2Client.refreshAccessToken();
-    oauth2Client.setCredentials(credentials);
-    setConfig(db, 'gmail_tokens', credentials);
-  } catch (err: any) {
-    throw new Error(`Gmail token refresh failed: ${err.message}`);
-  }
-
-  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-  const userEmail = getConfig(db, 'gmail_email') || '';
+  // scanSentMail is service-account only (2026-08-31): the OAuth tokens were
+  // bound to quinn@ and read the wrong mailbox for 10 days. The service account
+  // (domain-wide delegation) impersonates Zach's own mailbox directly — his
+  // SENT label is the same mailbox the inbox sync already reads. No routing
+  // rules, no mail copies: access was always there, this was a code choice.
+  const userEmail = 'zach.stock@recaptureinsurance.com';
+  const saAuth = getServiceAccountAuth(userEmail, ['https://www.googleapis.com/auth/gmail.readonly']);
+  if (!saAuth) throw new Error('Service account not configured for gmail.readonly');
+  const gmail = google.gmail({ version: 'v1', auth: saAuth });
 
   const afterDate = new Date(Date.now() - days * 86400000);
   const afterEpoch = Math.floor(afterDate.getTime() / 1000);
