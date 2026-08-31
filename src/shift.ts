@@ -16,6 +16,17 @@ const CYCLE_INTERVAL = 15 * 60 * 1000;  // 15 minutes
 let tickInFlight = false;
 const HOUR_MS = 60 * 60 * 1000;
 
+// Memory instrumentation (2026-08-31 audit): 3 heap-OOM crashes since Aug 26
+// with no per-phase visibility into where the 8GB gets consumed. Logs RSS/heap
+// at every phase boundary so the next crash's shift.log shows exactly which
+// phase was inflating the heap, and whether growth is within-cycle or
+// accumulating slowly across many ticks in this long-lived process.
+function logMem(label: string) {
+  const m = process.memoryUsage();
+  const mb = (n: number) => (n / 1024 / 1024).toFixed(0);
+  console.log(`[shift]   mem[${label}] rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB external=${mb(m.external)}MB arrayBuffers=${mb(m.arrayBuffers)}MB`);
+}
+
 async function tick() {
   const db = getDb();
   const now = new Date();
@@ -28,6 +39,7 @@ async function tick() {
   }
 
   console.log(`[shift] ${now.toLocaleTimeString()} — Tick starting...`);
+  logMem('tick-start');
 
   // ── EVERY TICK (15 min): Sync data ──
   try {
@@ -132,6 +144,7 @@ async function tick() {
     // Run dream pipeline FIRST (entity profiles, project profiles, commitments)
     // Intelligence cycle reads these outputs, so they must be fresh
     console.log('[shift]   Running dream pipeline (project/entity profiles, commitments)...');
+    logMem('pre-dream');
     try {
       const { runDreamPipeline } = await import('./dream.js');
       const dreamResult = await runDreamPipeline({ quick: true }); // SQL tasks only — LLM tasks replaced by wiki agents + PMs
@@ -141,6 +154,7 @@ async function tick() {
     } catch (err: any) {
       console.log('[shift]   Dream pipeline failed: ' + (err.message || '').slice(0, 60));
     }
+    logMem('post-dream');
 
     // NEW: Wiki compilation via DeepSeek agents (reads actual sources)
     console.log('[shift]   Compiling wiki pages (DeepSeek agents)...');
@@ -151,7 +165,7 @@ async function tick() {
     } catch (err: any) {
       console.log('[shift]   Wiki compilation failed: ' + (err.message || '').slice(0, 60));
     }
-
+    logMem('post-wiki-compile');
 
     // NEW: Verification layer — audit wiki claims against actual sources
     console.log("[shift]   Verifying wiki claims (DeepSeek audit)...");
@@ -163,6 +177,7 @@ async function tick() {
     } catch (err: any) {
       console.log("[shift]   Verification failed: " + (err.message || "").slice(0, 60));
     }
+    logMem('post-verification');
     // NEW: PM agents (Opus, persistent sessions, active projects only)
     console.log('[shift]   Running PM agents...');
     try {
@@ -179,6 +194,7 @@ async function tick() {
         } catch (pmErr: any) {
           console.log('[shift]   PM ' + pm.agentId + ' failed: ' + (pmErr.message || '').slice(0, 60));
         }
+        logMem(`post-pm-${pm.agentId}`);
       }
     } catch (err: any) {
       console.log('[shift]   PM agents failed: ' + (err.message || '').slice(0, 60));
@@ -205,6 +221,7 @@ async function tick() {
     } catch (err: any) {
       console.log('[shift]   Quinn failed: ' + (err.message || '').slice(0, 60));
     }
+    logMem('post-quinn');
 
     // Daily web research — scours internet for relevant articles (20-hour gate)
     console.log('[shift]   Running daily web research...');
@@ -219,6 +236,7 @@ async function tick() {
     } catch (err: any) {
       console.log('[shift]   Research failed: ' + (err.message || '').slice(0, 60));
     }
+    logMem('post-research');
 
     // Send DAILY intelligence email via Quinn — ONCE per day, morning only
     try {
@@ -297,6 +315,7 @@ async function tick() {
     } catch (err: any) {
       console.log('[shift]   Wiki lint failed: ' + (err.message || '').slice(0, 60));
     }
+    logMem('post-full-cycle');
 
     // Auto-sync: commit and push any changes after full cycle
     try {
@@ -360,6 +379,7 @@ async function tick() {
     }
   } catch (e) {}
 
+  logMem('tick-end');
   console.log(`[shift] ${now.toLocaleTimeString()} — Tick complete.`);
 }
 
