@@ -778,6 +778,11 @@ export async function sendEmail(
   // Header values may originate from LLM output — CR/LF here is header
   // injection (a newline in Subject can smuggle a Bcc). Audit 2026-08-31.
   const cleanHeader = (v?: string) => (v || '').replace(/[\r\n]+/g, ' ').trim();
+  // Non-ASCII in a raw RFC2822 header renders as mojibake (Â· â€") in most
+  // clients — RFC 2047 encoded-words are required. Body is fine (charset=utf-8).
+  const encodeHeader = (v: string) => /[^\x20-\x7E]/.test(v)
+    ? '=?UTF-8?B?' + Buffer.from(v, 'utf-8').toString('base64') + '?='
+    : v;
   options = { ...options, to: cleanHeader(options.to), subject: cleanHeader(options.subject),
     cc: options.cc ? cleanHeader(options.cc) : undefined, bcc: options.bcc ? cleanHeader(options.bcc) : undefined };
   const fromEmail = options.from || 'quinn@recaptureinsurance.com';
@@ -797,7 +802,7 @@ export async function sendEmail(
     `To: ${options.to}`,
     options.cc ? `Cc: ${options.cc}` : null,
     options.bcc ? `Bcc: ${options.bcc}` : null,
-    `Subject: ${options.subject}`,
+    `Subject: ${encodeHeader(options.subject)}`,
     'MIME-Version: 1.0',
     `Content-Type: ${contentType}; charset=utf-8`,
   ].filter(h => h !== null).join('\r\n');

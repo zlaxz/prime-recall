@@ -66,7 +66,16 @@ const toText = (v: unknown): string | null =>
   v == null ? null : (typeof v === 'object' ? JSON.stringify(v) : String(v));
 const oneLine = (v: unknown, max = 200): string | null => {
   const s = toText(v);
-  return s == null ? null : s.replace(/[\r\n]+/g, ' ').trim().slice(0, max) || null;
+  if (s == null) return null;
+  let out = s.replace(/[\r\n]+/g, ' ').trim();
+  if (out.length > max) {
+    // cut at a word boundary so truncation reads clean, not "closes today; d"
+    out = out.slice(0, max);
+    const sp = out.lastIndexOf(' ');
+    if (sp > max * 0.6) out = out.slice(0, sp);
+    out = out.replace(/[\s,;:—–-]+$/, '') + '…';
+  }
+  return out || null;
 };
 
 export function upsertLedgerRows(db: Database.Database, monitor: string, rows: LedgerRow[]): number {
