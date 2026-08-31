@@ -48,6 +48,15 @@ async function tick() {
   if (Date.now() - lastHourly > HOUR_MS) {
     console.log(`[shift]   Running hourly checks...`);
 
+    // Ledger → [ACT]/[REMIND] emails to Zach (scarcity-capped; drafts only, he sends)
+    try {
+      const { dispatchLedger } = await import('./ledger.js');
+      const d = await dispatchLedger(db);
+      if (d.sent || d.bumped) console.log(`[shift]   Ledger: ${d.sent} action/reminder emails, ${d.bumped} bumps`);
+    } catch (err: any) {
+      console.log(`[shift]   Ledger dispatch failed: ${(err.message || '').slice(0, 80)}`);
+    }
+
     // Meeting prep for next 2 hours
     try {
       const meetings = db.prepare(`

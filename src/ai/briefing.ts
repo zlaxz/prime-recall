@@ -125,6 +125,13 @@ export async function generateBriefing(
     [todayStr, tomorrowEnd.toISOString().split('T')[0]]
   );
 
+  // Ball-tracking: open actions + who-owes-whom, from the ledger
+  let ledgerDigest = '';
+  try {
+    const { getLedgerDigest } = await import('../ledger.js');
+    ledgerDigest = getLedgerDigest(db);
+  } catch {}
+
   // ── 8. Build the prompt ───────────────────────────────────
   const droppedBallsText = droppedBalls.length > 0
     ? droppedBalls.map(d => `- ${d.contact}: "${d.title}" (${d.daysSince} days with no reply)`).join('\n')
@@ -177,6 +184,7 @@ ${coldRelText}
 - Active commitments:
 ${commitmentsText}
 ${overdueText ? '\nOVERDUE COMMITMENTS:\n' + overdueText : ''}
+${ledgerDigest ? '\nBALL TRACKING (ledger — authoritative for who owes whom):\n' + ledgerDigest : ''}
 - Today's calendar:
 ${calendarText}
 - Business context: ${businessContext || 'Not set'}
@@ -188,6 +196,7 @@ Generate a briefing with these sections:
 1. TOP PRIORITIES — What needs attention RIGHT NOW (overdue commitments, dropped balls)
 2. TODAY'S SCHEDULE — Calendar events with relevant context from knowledge base
 3. COMMITMENTS CHECK — Status of all active commitments, what's due soon
+3b. BALL TRACKING — two short lists from the BALL TRACKING data: "You owe" and "Waiting on them" (oldest first, max 5 each). If open [ACT] actions exist, one index line: "Open actions in your inbox: ..." — do NOT restate their content; each already has its own email.
 4. RELATIONSHIP HEALTH — Who's going cold, who needs follow-up
 5. WHAT CHANGED — New knowledge items this week, key updates
 6. CROSS-REFERENCES — Connections between items that might be useful

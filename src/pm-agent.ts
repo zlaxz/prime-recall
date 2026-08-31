@@ -186,6 +186,11 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     '',
     '---CONCERNS_UPDATE---',
     '(What you\'re watching for next cycle. Replace the full list — keep it current.)',
+    '',
+    '---LEDGER---',
+    '(JSON array of ball-in-play items for your domain — the structured version of your wiki. Each: {"item":"stable-key-that-matches-prior-cycles","title":"short human line","counterparty":"who","state":"where it stands","ball":"zach|other","ball_since":"YYYY-MM-DD","deadline":"YYYY-MM-DD or null","next_action":"one concrete step","draft":"ready-to-send text or null","tier":"act|remind|brief|wiki","status":"open|resolved"}.',
+    'TIER RULES — tier "act" ONLY when ALL THREE hold: a finished draft is attached, delay costs something real (deadline/stall/money/legal), and only Zach can do it. Deadline-shaped with no decision → "remind". Awareness only → "brief". Something YOU watch → "wiki". Overuse of "act" makes every alert meaningless.',
+    'CLOSURE BY OBSERVATION: before emitting an item, search Zach\'s sent mail (source gmail-sent) — if he already took the recommended action, set status "resolved". Keep item keys stable so updates match.)',
   ].filter(Boolean).join('\n');
 
   // Call Opus via proxy — fresh session each cycle
@@ -214,8 +219,28 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     memoryUpdate = content.slice(memoryMarker + '---MEMORY_UPDATE---'.length).trim();
   }
 
-  if (concernsMarker >= 0) {
+  const ledgerMarker = content.indexOf('---LEDGER---');
+  if (concernsMarker >= 0 && ledgerMarker >= 0) {
+    concernsUpdate = content.slice(concernsMarker + '---CONCERNS_UPDATE---'.length, ledgerMarker).trim();
+  } else if (concernsMarker >= 0) {
     concernsUpdate = content.slice(concernsMarker + '---CONCERNS_UPDATE---'.length).trim();
+  }
+
+  // Parse + store ledger rows (structured ball-tracking behind the wiki)
+  if (ledgerMarker >= 0) {
+    try {
+      let raw = content.slice(ledgerMarker + '---LEDGER---'.length).trim();
+      raw = raw.replace(/^```(json)?/m, '').replace(/```\s*$/m, '').trim();
+      const start = raw.indexOf('['); const end = raw.lastIndexOf(']');
+      if (start >= 0 && end > start) {
+        const rows = JSON.parse(raw.slice(start, end + 1));
+        const { upsertLedgerRows } = await import('./ledger.js');
+        const n = upsertLedgerRows(db, config.agentId, rows);
+        console.log(`    PM ${config.agentId}: ${n} ledger rows upserted`);
+      }
+    } catch (e: any) {
+      console.log(`    PM ${config.agentId}: ledger parse failed — ${(e.message || '').slice(0, 80)}`);
+    }
   }
 
   // Save wiki page
