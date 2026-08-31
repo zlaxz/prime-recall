@@ -13,6 +13,7 @@ import { syncAll } from './connectors/index.js';
 // ============================================================
 
 const CYCLE_INTERVAL = 15 * 60 * 1000;  // 15 minutes
+let tickInFlight = false;
 const HOUR_MS = 60 * 60 * 1000;
 
 async function tick() {
@@ -167,6 +168,7 @@ async function tick() {
     try {
       const { runPMAgent } = await import('./pm-agent.js');
       // Roster lives in pm_agents — Quinn adds monitors via prime_create_monitor
+      db.exec("CREATE TABLE IF NOT EXISTS pm_agents (agent_id TEXT PRIMARY KEY, project TEXT NOT NULL, active INTEGER DEFAULT 1, created_by TEXT DEFAULT 'system', mandate TEXT, created_at TEXT DEFAULT (datetime('now')))");
       const roster = db.prepare(
         "SELECT agent_id, project FROM pm_agents WHERE active = 1 ORDER BY created_at"
       ).all() as any[];
@@ -180,6 +182,16 @@ async function tick() {
       }
     } catch (err: any) {
       console.log('[shift]   PM agents failed: ' + (err.message || '').slice(0, 60));
+    }
+
+    // PMs just wrote fresh ledger rows — dispatch now instead of waiting
+    // up to an hour for the next hourly gate.
+    try {
+      const { dispatchLedger } = await import('./ledger.js');
+      const d2 = await dispatchLedger(db);
+      if (d2.sent || d2.bumped) console.log(`[shift]   Ledger (post-PM): ${d2.sent} sent, ${d2.bumped} bumps`);
+    } catch (err: any) {
+      console.log('[shift]   Post-PM ledger dispatch failed: ' + (err.message || '').slice(0, 60));
     }
 
     // Quinn Agent — tool-using COS on Opus 4.7
@@ -360,10 +372,16 @@ async function main() {
 
   // Then loop
   setInterval(async () => {
+    // Full cycles run 40-55 min > the 15-min interval; overlapping ticks
+    // double-run syncs/PMs and drive the heap toward the 8GB OOM (audit 2026-08-31).
+    if (tickInFlight) { console.log('[shift] Tick skipped — previous tick still running.'); return; }
+    tickInFlight = true;
     try {
       await tick();
     } catch (err: any) {
       console.error(`[shift] Tick error: ${err.message}`);
+    } finally {
+      tickInFlight = false;
     }
   }, CYCLE_INTERVAL);
 }

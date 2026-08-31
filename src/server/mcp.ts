@@ -539,12 +539,15 @@ srv.tool(
   },
   async ({ observation, why_wrong, agent }) => {
     const db = getDb();
+    // Multi-line text breaks the watchdog's line-based dispatch read
+    observation = observation.replace(/\s*[\r\n]+\s*/g, ' ').trim().slice(0, 1500);
+    why_wrong = (why_wrong || '').replace(/\s*[\r\n]+\s*/g, ' ').trim().slice(0, 1000);
     db.exec(`CREATE TABLE IF NOT EXISTS system_issues (
       id TEXT PRIMARY KEY, reported_by TEXT, observation TEXT, why_wrong TEXT,
       status TEXT DEFAULT 'open', result_status TEXT, report_path TEXT,
       created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))`);
     const dup = db.prepare(
-      "SELECT id, status FROM system_issues WHERE status IN ('open','dispatched') AND observation = ?"
+      "SELECT id, status FROM system_issues WHERE status IN ('open','dispatched') AND substr(observation,1,80) = substr(?,1,80)"
     ).get(observation) as any;
     if (dup) {
       return { content: [{ type: "text", text: `Already filed as issue ${String(dup.id).slice(0, 8)} (status: ${dup.status}). Do not re-report; check for a 'mechanic-report' item instead.` }] };
@@ -573,10 +576,13 @@ srv.tool(
       created_by TEXT DEFAULT 'system', mandate TEXT,
       created_at TEXT DEFAULT (datetime('now')))`);
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40);
+    if (!slug) {
+      return { content: [{ type: "text" as const, text: "Monitor not created: name produced an empty id. Use a short ASCII name." }] };
+    }
     const agentId = slug.endsWith('-pm') ? slug : `${slug}-pm`;
     const existing = db.prepare("SELECT agent_id, active FROM pm_agents WHERE agent_id = ? OR project = ?").get(agentId, name) as any;
     if (existing) {
-      if (!existing.active) db.prepare("UPDATE pm_agents SET active = 1 WHERE agent_id = ?").run(existing.agent_id);
+      if (!existing.active) db.prepare("UPDATE pm_agents SET active = 1, mandate = ?, created_by = ? WHERE agent_id = ?").run(mandate, created_by || 'quinn', existing.agent_id);
       return { content: [{ type: "text" as const, text: `Monitor '${existing.agent_id}' already exists${existing.active ? '' : ' (reactivated)'}. It runs every cycle; its wiki page is under project '${name}'.` }] };
     }
     const active = db.prepare("SELECT COUNT(*) AS n FROM pm_agents WHERE active = 1").get() as any;

@@ -106,7 +106,7 @@ function capMemory(memoryContent: string): string {
     '',
   ].join('\n');
 
-  return [historicalBlock, ...toKeep].join('\n\n');
+  return [...historicalParts, historicalBlock, ...toKeep].join('\n\n');
 }
 
 // Call the proxy to run Opus with MCP tools.
@@ -134,6 +134,9 @@ async function callProxy(prompt: string, maxTurns: number, timeoutSec: number): 
 
     const parsed = JSON.parse(stdout);
     if (parsed.error) throw new Error(`Proxy error: ${parsed.error}`);
+    if (parsed.exit_code !== undefined && parsed.exit_code !== 0) {
+      throw new Error(`Proxy exit_code ${parsed.exit_code}: ${String(parsed.result || '').slice(0, 120)}`);
+    }
     return { result: parsed.result || '', sessionId: parsed.session_id || '' };
   } finally {
     try { const { unlinkSync } = await import('fs'); unlinkSync(tmpPath); } catch {}
@@ -148,7 +151,8 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
 
   // Load agent identity and memory
   const soul = readFile(join(dir, 'SOUL.md'));
-  const memory = readFile(join(dir, 'MEMORY.md'));
+  const memoryRaw = readFile(join(dir, 'MEMORY.md'));
+  const memory = memoryRaw.length > 40000 ? '(older memory truncated)\n' + memoryRaw.slice(-40000) : memoryRaw;
   const concerns = readFile(join(dir, 'CONCERNS.md'));
   const lastWikiPage = readFile(join(dir, 'wiki-page.md'));
 
@@ -174,9 +178,11 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     '- VERIFY OWNERSHIP: Before saying "Person X owns task Y," search for emails between X and the relevant party. Check WHO is actually in the email thread. If Zach has been emailing someone directly, that is Zach\'s relationship — do not attribute it to a team member just because they were mentioned nearby.',
     '- CITE OR DELETE: Every factual claim must trace to a specific email you retrieved via prime_retrieve. If you only read a summary or search result, you do NOT have evidence. Either retrieve the source or delete the claim.',
     '- SEPARATE VERIFIED FROM ASSUMED: In your wiki page, mark claims as [VERIFIED: thread:ID] or [UNVERIFIED: inference from summary]. Do not present inferences as facts.',
+    '- NO SEND AUTHORITY: You must NEVER call prime_send_email, prime_approve_action, prime_schedule_meeting, or any tool that contacts a third party. Outbound text goes ONLY into the ledger draft field — Zach sends it himself.',
+    '- ACT BUDGET: at most 2 act-tier ledger items per cycle. If more qualify, keep the two most costly to delay and tier the rest remind or brief.',
     '- CHECK YOUR PRIOR ASSUMPTIONS: Your memory from last cycle may be wrong. If you wrote "Forrest is handling X" last cycle, verify it this cycle by checking who is actually emailing about X.',
     '',
-    'After investigating AND verifying your claims, produce THREE outputs separated by these exact markers:',
+    'After investigating AND verifying your claims, produce FOUR outputs separated by these exact markers:',
     '',
     '---WIKI_PAGE---',
     '(Your updated wiki page for ' + config.project + ')',
@@ -206,24 +212,24 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   const wikiMarker = content.indexOf('---WIKI_PAGE---');
   const memoryMarker = content.indexOf('---MEMORY_UPDATE---');
   const concernsMarker = content.indexOf('---CONCERNS_UPDATE---');
+  const ledgerMarkerPos = content.indexOf('---LEDGER---');
+  // A missing middle marker must not let a slice swallow later blocks
+  // (MEMORY.md was ingesting the raw LEDGER JSON when CONCERNS was absent).
+  const nextMarkerAfter = (pos: number): number | undefined => {
+    const later = [memoryMarker, concernsMarker, ledgerMarkerPos].filter(m => m > pos);
+    return later.length ? Math.min(...later) : undefined;
+  };
 
-  if (wikiMarker >= 0 && memoryMarker >= 0) {
-    wikiPage = content.slice(wikiMarker + '---WIKI_PAGE---'.length, memoryMarker).trim();
-  } else if (wikiMarker >= 0) {
-    wikiPage = content.slice(wikiMarker + '---WIKI_PAGE---'.length).trim();
+  if (wikiMarker >= 0) {
+    wikiPage = content.slice(wikiMarker + '---WIKI_PAGE---'.length, nextMarkerAfter(wikiMarker)).trim();
+  }
+  if (memoryMarker >= 0) {
+    memoryUpdate = content.slice(memoryMarker + '---MEMORY_UPDATE---'.length, nextMarkerAfter(memoryMarker)).trim();
   }
 
-  if (memoryMarker >= 0 && concernsMarker >= 0) {
-    memoryUpdate = content.slice(memoryMarker + '---MEMORY_UPDATE---'.length, concernsMarker).trim();
-  } else if (memoryMarker >= 0) {
-    memoryUpdate = content.slice(memoryMarker + '---MEMORY_UPDATE---'.length).trim();
-  }
-
-  const ledgerMarker = content.indexOf('---LEDGER---');
-  if (concernsMarker >= 0 && ledgerMarker >= 0) {
-    concernsUpdate = content.slice(concernsMarker + '---CONCERNS_UPDATE---'.length, ledgerMarker).trim();
-  } else if (concernsMarker >= 0) {
-    concernsUpdate = content.slice(concernsMarker + '---CONCERNS_UPDATE---'.length).trim();
+  const ledgerMarker = ledgerMarkerPos;
+  if (concernsMarker >= 0) {
+    concernsUpdate = content.slice(concernsMarker + '---CONCERNS_UPDATE---'.length, ledgerMarker > concernsMarker ? ledgerMarker : undefined).trim();
   }
 
   // Parse + store ledger rows (structured ball-tracking behind the wiki)
@@ -243,8 +249,14 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     }
   }
 
-  // Save wiki page
-  writeAgentFile(config.agentId, 'wiki-page.md', wikiPage);
+  // Save wiki page — only when markers parsed and content is substantive.
+  // An unmarked or tiny response means the run failed; keep the old page.
+  const wikiValid = wikiMarker >= 0 && wikiPage.length >= 200;
+  if (wikiValid) {
+    writeAgentFile(config.agentId, 'wiki-page.md', wikiPage);
+  } else {
+    console.log(`    PM ${config.agentId}: wiki output invalid (marker=${wikiMarker >= 0}, len=${wikiPage.length}) — keeping previous page`);
+  }
 
   // Append to MEMORY.md (don't replace — accumulate, but cap at MAX_MEMORY_CYCLES)
   if (memoryUpdate) {
@@ -265,10 +277,10 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   const notesDir = join(dir, 'daily-notes');
   if (!existsSync(notesDir)) mkdirSync(notesDir, { recursive: true });
   const dateKey = now.toISOString().slice(0, 10);
-  writeFileSync(join(notesDir, dateKey + '.md'), `# ${config.agentId} — ${dateStr}\n\n${content}`, 'utf-8');
+  writeFileSync(join(notesDir, dateKey + '.md'), `\n\n# ${config.agentId} — ${dateStr} — run ${now.toISOString().slice(11, 16)}\n\n${content}`, { encoding: 'utf-8', flag: 'a' });
 
   // Store wiki page in compiled_pages
-  db.prepare(`
+  if (wikiValid) db.prepare(`
     INSERT OR REPLACE INTO compiled_pages (id, page_type, subject_id, subject_name, content, version,
       last_source_date, compiled_at, stale)
     VALUES (?, 'project', ?, ?, ?, COALESCE((SELECT version + 1 FROM compiled_pages WHERE page_type = 'project' AND subject_id = ?), 1),

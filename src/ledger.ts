@@ -8,11 +8,15 @@
 // Prime does NOT send to third parties (Zach's call, 2026-08-31): drafts
 // ride inside the action email and Zach sends from his own account.
 // Monitors close loops by observing gmail-sent, not by reply protocol.
+//
+// Lifecycle of an [ACT] slot (audit fix 2026-08-31): notify → one bump at
+// 48h → demote to tier='brief' (frees the slot; the brief carries it).
+// Reopened items (resolved→open) get their notification state reset.
 import Database from 'better-sqlite3';
 import { v4 as uuid } from 'uuid';
 
 export interface LedgerRow {
-  item: string;          // stable key within the monitor, e.g. "claim-0118444-coverage-position"
+  item: string;          // stable key within the monitor
   title: string;
   counterparty?: string;
   state?: string;
@@ -25,9 +29,11 @@ export interface LedgerRow {
   status?: 'open' | 'resolved' | 'dismissed';
 }
 
-const MAX_OPEN_ACT = 3;      // open [ACT] emails in Zach's inbox at once
-const MAX_NEW_PER_DAY = 2;   // new [ACT] emails per day
-const BUMP_AFTER_HOURS = 48; // one bump, then it demotes to the brief
+const MAX_OPEN_ACT = 3;        // open [ACT] emails in Zach's inbox at once
+const MAX_NEW_ACT_PER_DAY = 2; // new [ACT] emails per local day
+const MAX_REMIND_PER_DAY = 2;  // [REMIND] emails per local day
+const MAX_ACT_PER_MONITOR = 2; // act-tier rows accepted per monitor per upsert
+const BUMP_AFTER_HOURS = 48;   // one bump, then demote to brief
 
 export function ensureLedger(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS ledger (
@@ -52,30 +58,77 @@ export function ensureLedger(db: Database.Database): void {
   )`);
 }
 
+// LLM output → clean scalar. Headers and single-line fields must never
+// carry CR/LF (email header injection via Subject was a confirmed audit
+// finding); drafts keep their newlines — they only ever go in the body.
+const toText = (v: unknown): string | null =>
+  v == null ? null : (typeof v === 'object' ? JSON.stringify(v) : String(v));
+const oneLine = (v: unknown, max = 200): string | null => {
+  const s = toText(v);
+  return s == null ? null : s.replace(/[\r\n]+/g, ' ').trim().slice(0, max) || null;
+};
+
 export function upsertLedgerRows(db: Database.Database, monitor: string, rows: LedgerRow[]): number {
   ensureLedger(db);
-  let n = 0;
   const up = db.prepare(`
     INSERT INTO ledger (id, monitor, item, title, counterparty, state, ball, ball_since, deadline, next_action, draft, tier, status)
     VALUES (@id, @monitor, @item, @title, @counterparty, @state, @ball, @ball_since, @deadline, @next_action, @draft, @tier, @status)
     ON CONFLICT(monitor, item) DO UPDATE SET
       title=@title, counterparty=@counterparty, state=@state, ball=@ball, ball_since=@ball_since,
       deadline=@deadline, next_action=@next_action, draft=@draft, tier=@tier, status=@status,
+      notified_at = CASE WHEN ledger.status <> 'open' AND @status = 'open' THEN NULL ELSE ledger.notified_at END,
+      bumped_at   = CASE WHEN ledger.status <> 'open' AND @status = 'open' THEN NULL ELSE ledger.bumped_at END,
       updated_at=datetime('now')
   `);
-  for (const r of rows) {
-    if (!r?.item || !r?.title) continue;
-    up.run({
-      id: uuid(), monitor, item: String(r.item).slice(0, 120), title: String(r.title).slice(0, 200),
-      counterparty: r.counterparty ?? null, state: r.state ?? null, ball: r.ball ?? null,
-      ball_since: r.ball_since ?? null, deadline: r.deadline ?? null,
-      next_action: r.next_action ?? null, draft: r.draft ?? null,
-      tier: r.tier ?? 'brief', status: r.status ?? 'open',
+
+  // Normalize + gate before writing. Monitors over-produce act rows (observed
+  // day one: 6 from one monitor), so tier discipline is enforced here, not
+  // just in the prompt.
+  const TIERS = new Set(['act', 'remind', 'brief', 'wiki']);
+  const cleaned = rows
+    .filter(r => r && r.item && r.title)
+    .map(r => {
+      let tier = String(r.tier || 'brief').trim().toLowerCase();
+      if (!TIERS.has(tier)) tier = 'brief';
+      let status = String(r.status || 'open').trim().toLowerCase();
+      if (status === 'closed' || status === 'done' || status === 'complete') status = 'resolved';
+      if (!['open', 'resolved', 'dismissed'].includes(status)) status = 'open';
+      let ball = String(r.ball || '').trim().toLowerCase();
+      if (!['zach', 'other', 'agent'].includes(ball)) ball = '';
+      const draft = toText(r.draft);
+      const deadline = oneLine(r.deadline, 40);
+      const ball_since = oneLine(r.ball_since, 40);
+      // act requires a finished draft and a time anchor — else demote
+      if (tier === 'act' && (!draft || !(deadline || ball_since))) tier = deadline ? 'remind' : 'brief';
+      return {
+        id: uuid(), monitor, item: oneLine(r.item, 120)!, title: oneLine(r.title, 200)!,
+        counterparty: oneLine(r.counterparty), state: oneLine(r.state, 300), ball: ball || null,
+        ball_since, deadline, next_action: oneLine(r.next_action, 400), draft,
+        tier, status,
+      };
     });
-    n++;
+
+  // Per-monitor act cap: keep the most time-anchored, demote the rest.
+  const acts = cleaned.filter(r => r.tier === 'act' && r.status === 'open');
+  if (acts.length > MAX_ACT_PER_MONITOR) {
+    acts.sort((a, b) => (a.deadline ? 0 : 1) - (b.deadline ? 0 : 1) || String(a.deadline || a.ball_since || '').localeCompare(String(b.deadline || b.ball_since || '')));
+    for (const r of acts.slice(MAX_ACT_PER_MONITOR)) r.tier = 'brief';
   }
+
+  let n = 0;
+  const run = db.transaction((batch: typeof cleaned) => {
+    for (const r of batch) {
+      try { up.run(r); n++; } catch (e: any) {
+        console.log(`    ledger: row '${r.item}' skipped — ${(e.message || '').slice(0, 60)}`);
+      }
+    }
+  });
+  run(cleaned);
   return n;
 }
+
+// Own agents, bots, and receipts are not counterparties Zach owes.
+const NOISE = /quinn@|prime@|noreply|no-reply|donotreply|notification|billing@|mailer-daemon|unsubscribe|automatic reply|auto-reply|out of office/i;
 
 // "You owe / Waiting on" across ALL mail, from extraction's waiting_on_user flag.
 export function getBallLists(db: Database.Database, windowDays = 45, cap = 10): { youOwe: string[]; waitingOn: string[] } {
@@ -91,28 +144,31 @@ export function getBallLists(db: Database.Database, windowDays = 45, cap = 10): 
     HAVING sd >= datetime('now', ?)
   `).all(`-${windowDays} days`) as any[];
   const days = (sd: string) => Math.floor((Date.now() - new Date(sd).getTime()) / 86400000);
-  // Own agents, bots, and receipts are not counterparties Zach owes
-  const NOISE = /quinn@|prime@|noreply|no-reply|donotreply|notification|billing@|mailer-daemon/i;
-  const youOwe = rows
-    .filter(r => (r.wou === 1 || r.wou === true) && !NOISE.test(String(r.last_from || '')))
-    .sort((a, b) => a.sd.localeCompare(b.sd)).slice(0, cap)
+  const clean = rows.filter(r => !NOISE.test(String(r.last_from || '')) && !NOISE.test(String(r.subj || '')));
+  // youOwe: newest first — what Zach owes NOW, not the stale edge of the window
+  const youOwe = clean
+    .filter(r => r.wou === 1 || r.wou === true)
+    .sort((a, b) => b.sd.localeCompare(a.sd)).slice(0, cap)
     .map(r => {
       const who = String(r.last_from || '').replace(/<[^>]*>/g, '').trim() || 'unknown';
       return `${who} — "${String(r.subj || '(no subject)').slice(0, 70)}" (${days(r.sd)}d)`;
     });
-  // Zach sent last — the display is the thread, not the sender (which is Zach)
-  const waitingOn = rows
-    .filter(r => r.wou === 0 || r.wou === false)
+  // waitingOn: Zach sent last — oldest silence first; the thread is the display
+  const waitingOn = clean
+    .filter(r => (r.wou === 0 || r.wou === false) && String(r.subj || '').trim())
     .sort((a, b) => a.sd.localeCompare(b.sd)).slice(0, cap)
-    .map(r => `"${String(r.subj || '(no subject)').slice(0, 70)}" — no reply in ${days(r.sd)}d`);
+    .map(r => `"${String(r.subj).slice(0, 70)}" — no reply in ${days(r.sd)}d`);
   return { youOwe, waitingOn };
 }
 
-// Compact digest for the morning brief: open actions + ball lists.
+// Compact digest for the morning brief: open actions, stalls, ball lists.
 export function getLedgerDigest(db: Database.Database): string {
   ensureLedger(db);
   const open = db.prepare(
     "SELECT title, monitor, notified_at FROM ledger WHERE tier='act' AND status='open' ORDER BY notified_at IS NULL, created_at"
+  ).all() as any[];
+  const stalled = db.prepare(
+    "SELECT title, monitor FROM ledger WHERE status='open' AND bumped_at IS NOT NULL AND tier='brief' ORDER BY bumped_at DESC LIMIT 5"
   ).all() as any[];
   const { youOwe, waitingOn } = getBallLists(db);
   const parts: string[] = [];
@@ -120,13 +176,17 @@ export function getLedgerDigest(db: Database.Database): string {
     parts.push('OPEN ACTIONS (each has its own [ACT] email):');
     for (const o of open) parts.push(`- ${o.title} [${o.monitor}]${o.notified_at ? '' : ' (queued)'}`);
   }
-  if (youOwe.length) { parts.push('', 'YOU OWE A RESPONSE:'); for (const l of youOwe) parts.push(`- ${l}`); }
+  if (stalled.length) {
+    parts.push('', 'STALLING (emailed + bumped, no visible movement — no more emails will be sent):');
+    for (const s of stalled) parts.push(`- ${s.title} [${s.monitor}]`);
+  }
+  if (youOwe.length) { parts.push('', 'YOU OWE A RESPONSE (newest first):'); for (const l of youOwe) parts.push(`- ${l}`); }
   if (waitingOn.length) { parts.push('', 'WAITING ON THEM (oldest first):'); for (const l of waitingOn) parts.push(`- ${l}`); }
   return parts.join('\n');
 }
 
 // Turn ledger state into at most a trickle of emails. Caps are structural:
-// scarcity survives classifier bad days.
+// scarcity survives classifier bad days. All day-windows are LOCAL days.
 export async function dispatchLedger(db: Database.Database): Promise<{ sent: number; bumped: number }> {
   ensureLedger(db);
   const { sendEmail } = await import('./connectors/gmail.js');
@@ -134,14 +194,18 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
   let sent = 0, bumped = 0;
 
   const openNotified = (db.prepare(
-    "SELECT COUNT(*) n FROM ledger WHERE tier='act' AND status='open' AND notified_at IS NOT NULL"
+    "SELECT COUNT(*) n FROM ledger WHERE tier='act' AND status='open' AND notified_at IS NOT NULL AND bumped_at IS NULL"
   ).get() as any).n;
-  const today = (db.prepare(
-    "SELECT COUNT(*) n FROM ledger WHERE notified_at >= datetime('now','start of day')"
+  const todayAct = (db.prepare(
+    "SELECT COUNT(*) n FROM ledger WHERE tier='act' AND date(notified_at,'localtime') = date('now','localtime')"
+  ).get() as any).n;
+  const todayRemind = (db.prepare(
+    "SELECT COUNT(*) n FROM ledger WHERE tier='remind' AND date(notified_at,'localtime') = date('now','localtime')"
   ).get() as any).n;
 
+  const subj = (s: string) => s.replace(/[\r\n]+/g, ' ').slice(0, 180);
   const body = (r: any, bump: boolean) => [
-    bump ? 'BUMP — 48h with no visible movement. After this it drops to the brief.' : null,
+    bump ? 'BUMP — 48h with no visible movement. This is the last email about it; from now on the morning brief carries it.' : null,
     `${r.title}`,
     `Monitor: ${r.monitor}${r.counterparty ? `   Counterparty: ${r.counterparty}` : ''}`,
     r.state ? `Where it stands: ${r.state}` : null,
@@ -151,49 +215,47 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
     r.next_action ? `DO THIS: ${r.next_action}` : null,
     r.draft ? `\n--- READY-TO-SEND DRAFT (send from your own account) ---\n${r.draft}\n---` : null,
     '',
-    'No reply needed — when you send it, the monitor sees your sent mail and closes this out.',
-    'Reply SKIP if you want it dropped.',
+    'No reply needed — when you act, the monitor sees your sent mail and closes this out.',
+    'To drop it: tell Quinn or Claude to dismiss it.',
   ].filter(l => l !== null).join('\n');
 
   // New [ACT] notifications, under both caps, most urgent first.
-  const room = Math.max(0, Math.min(MAX_OPEN_ACT - openNotified, MAX_NEW_PER_DAY - today));
+  const room = Math.max(0, Math.min(MAX_OPEN_ACT - openNotified, MAX_NEW_ACT_PER_DAY - todayAct));
   if (room > 0) {
     const candidates = db.prepare(`
       SELECT * FROM ledger WHERE tier='act' AND status='open' AND notified_at IS NULL
       ORDER BY deadline IS NULL, deadline, ball_since LIMIT ?
     `).all(room) as any[];
     for (const r of candidates) {
-      const res = await sendEmail(db, { to, subject: `[ACT] ${r.title}`, body: body(r, false) });
-      if (res.success) {
-        db.prepare("UPDATE ledger SET notified_at=datetime('now') WHERE id=?").run(r.id);
-        sent++;
-      }
+      const res = await sendEmail(db, { to, subject: subj(`[ACT] ${r.title}`), body: body(r, false) });
+      if (res.success) { db.prepare("UPDATE ledger SET notified_at=datetime('now') WHERE id=?").run(r.id); sent++; }
     }
   }
 
-  // One bump each, then the brief carries it.
+  // One bump each — then DEMOTE to brief so the slot frees and emails stop.
   const stale = db.prepare(`
     SELECT * FROM ledger WHERE tier='act' AND status='open' AND bumped_at IS NULL
       AND notified_at IS NOT NULL AND notified_at <= datetime('now', ?)
   `).all(`-${BUMP_AFTER_HOURS} hours`) as any[];
   for (const r of stale) {
-    const res = await sendEmail(db, { to, subject: `[ACT — bump] ${r.title}`, body: body(r, true) });
+    const res = await sendEmail(db, { to, subject: subj(`[ACT — bump] ${r.title}`), body: body(r, true) });
     if (res.success) {
-      db.prepare("UPDATE ledger SET bumped_at=datetime('now') WHERE id=?").run(r.id);
+      db.prepare("UPDATE ledger SET bumped_at=datetime('now'), tier='brief' WHERE id=?").run(r.id);
       bumped++;
     }
   }
 
-  // Reminders: deadline entering the 5-day window, one email, no bump.
-  const reminders = db.prepare(`
-    SELECT * FROM ledger WHERE tier='remind' AND status='open' AND notified_at IS NULL
-      AND deadline IS NOT NULL AND date(deadline) <= date('now','+5 days') LIMIT 2
-  `).all() as any[];
-  for (const r of reminders) {
-    const res = await sendEmail(db, { to, subject: `[REMIND] ${r.title} — due ${r.deadline}`, body: body(r, false) });
-    if (res.success) {
-      db.prepare("UPDATE ledger SET notified_at=datetime('now') WHERE id=?").run(r.id);
-      sent++;
+  // Reminders: deadline entering the 5-day window; own daily cap; soonest first.
+  const remindRoom = Math.max(0, MAX_REMIND_PER_DAY - todayRemind);
+  if (remindRoom > 0) {
+    const reminders = db.prepare(`
+      SELECT * FROM ledger WHERE tier='remind' AND status='open' AND notified_at IS NULL
+        AND deadline IS NOT NULL AND date(deadline) <= date('now','+5 days')
+      ORDER BY date(deadline) LIMIT ?
+    `).all(remindRoom) as any[];
+    for (const r of reminders) {
+      const res = await sendEmail(db, { to, subject: subj(`[REMIND] ${r.title} — due ${r.deadline}`), body: body(r, false) });
+      if (res.success) { db.prepare("UPDATE ledger SET notified_at=datetime('now') WHERE id=?").run(r.id); sent++; }
     }
   }
 

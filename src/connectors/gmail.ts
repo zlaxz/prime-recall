@@ -791,6 +791,11 @@ export async function sendEmail(
   }
 ): Promise<{ success: boolean; messageId?: string; threadId?: string; error?: string }> {
   // Use service account for sending (domain-wide delegation with gmail.send scope)
+  // Header values may originate from LLM output — CR/LF here is header
+  // injection (a newline in Subject can smuggle a Bcc). Audit 2026-08-31.
+  const cleanHeader = (v?: string) => (v || '').replace(/[\r\n]+/g, ' ').trim();
+  options = { ...options, to: cleanHeader(options.to), subject: cleanHeader(options.subject),
+    cc: options.cc ? cleanHeader(options.cc) : undefined, bcc: options.bcc ? cleanHeader(options.bcc) : undefined };
   const fromEmail = options.from || 'quinn@recaptureinsurance.com';
   const saAuth = getServiceAccountAuth(fromEmail, ['https://www.googleapis.com/auth/gmail.send']);
   if (!saAuth) {
@@ -828,7 +833,11 @@ export async function sendEmail(
     });
 
     // Log the sent email — but mark system-sent emails as derived to prevent contamination
-    const isSystemEmail = options.to.includes('zach.stock@recaptureinsurance') && options.subject?.includes('Brief');
+    // System emails ([ACT]/[REMIND]/[PRIME HEALTH]/MECHANIC/briefs to Zach) must NOT be
+    // logged as primary gmail-sent — monitors search gmail-sent for closure evidence,
+    // and Quinn's own alert about an action must never count as the action (audit 2026-08-31).
+    const isSystemEmail = options.to.includes('zach.stock@recaptureinsurance') &&
+      (options.subject?.includes('Brief') || /^\[/.test(options.subject || '') || /^MECHANIC /.test(options.subject || ''));
     const { v4: uuidv4 } = await import('uuid');
     insertKnowledge(db, {
       id: uuidv4(),

@@ -69,15 +69,20 @@ export async function generateBriefing(
   }
 
   // ── 5. Detect dropped balls ───────────────────────────────
+  // Age computed LIVE from source_date (metadata.days_since_last is frozen at
+  // extraction time), bounded to a 60-day window — the unbounded frozen scan
+  // injected 1,377 permanently-stale lines (~120KB) into every brief (audit).
   const droppedBalls: { title: string; contact: string; daysSince: number }[] = [];
   for (const item of allItems) {
     const meta = parseJsonField(item.metadata);
-    if (meta.waiting_on_user && meta.days_since_last > 7) {
+    if (!meta.waiting_on_user || !item.source_date) continue;
+    const liveDays = Math.floor((now.getTime() - new Date(item.source_date as string).getTime()) / 86400000);
+    if (liveDays > 7 && liveDays <= 60) {
       const contacts = parseJsonField(item.contacts);
       droppedBalls.push({
         title: item.title as string,
         contact: contacts.join(', ') || 'Unknown',
-        daysSince: meta.days_since_last,
+        daysSince: liveDays,
       });
     }
   }
@@ -134,7 +139,8 @@ export async function generateBriefing(
 
   // ── 8. Build the prompt ───────────────────────────────────
   const droppedBallsText = droppedBalls.length > 0
-    ? droppedBalls.map(d => `- ${d.contact}: "${d.title}" (${d.daysSince} days with no reply)`).join('\n')
+    ? droppedBalls.sort((a, b) => b.daysSince - a.daysSince).slice(0, 20)
+        .map(d => `- ${d.contact}: "${d.title}" (${d.daysSince} days with no reply)`).join('\n')
     : 'None detected';
 
   const coldRelText = coldRelationships.length > 0
