@@ -157,10 +157,11 @@ async function tick() {
     console.log('[shift]   Running PM agents...');
     try {
       const { runPMAgent } = await import('./pm-agent.js');
-      for (const pm of [
-        { project: 'Carefront', agentId: 'carefront-pm' },
-        { project: 'Foresite', agentId: 'foresite-pm' },
-      ]) {
+      // Roster lives in pm_agents — Quinn adds monitors via prime_create_monitor
+      const roster = db.prepare(
+        "SELECT agent_id, project FROM pm_agents WHERE active = 1 ORDER BY created_at"
+      ).all() as any[];
+      for (const pm of roster.map((r: any) => ({ project: r.project, agentId: r.agent_id }))) {
         try {
           const result = await runPMAgent(db, pm);
           console.log('[shift]   PM ' + pm.agentId + ': done (' + (result.durationMs / 1000).toFixed(0) + 's)');

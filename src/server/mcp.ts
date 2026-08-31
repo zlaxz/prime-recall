@@ -557,6 +557,60 @@ srv.tool(
 );
 
 srv.tool(
+  "prime_create_monitor",
+  "Create a STANDING monitor — a PM agent that investigates its situation every intelligence cycle, maintains a wiki page, tracks statuses/deadlines/next-actions, and feeds Quinn's briefs. Use for a DEVELOPING SITUATION that will play out over weeks: a client with active claims, a deal in motion, a dispute, a renewal season. NOT for one-off research (use prime_spawn_agent). After creating one, announce it in your next brief: 'I stood up a [X] monitor — say kill it if you don't want it.' The monitor runs from the next cycle onward.",
+  {
+    name: z.string().describe("Short monitor name, e.g. 'Behrends Claims' — becomes the wiki page subject"),
+    mandate: z.string().describe("What to monitor and how to help, concretely: the entities/threads to track, what counts as movement, what to maintain (per-claim status, adjuster, deadlines, missing docs, recommended next actions)"),
+    created_by: z.string().optional().describe("Who is creating this (default 'quinn')"),
+  },
+  async ({ name, mandate, created_by }) => {
+    const db = getDb();
+    const { mkdirSync, writeFileSync, existsSync } = await import('fs');
+    const { join } = await import('path');
+    db.exec(`CREATE TABLE IF NOT EXISTS pm_agents (
+      agent_id TEXT PRIMARY KEY, project TEXT NOT NULL, active INTEGER DEFAULT 1,
+      created_by TEXT DEFAULT 'system', mandate TEXT,
+      created_at TEXT DEFAULT (datetime('now')))`);
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40);
+    const agentId = slug.endsWith('-pm') ? slug : `${slug}-pm`;
+    const existing = db.prepare("SELECT agent_id, active FROM pm_agents WHERE agent_id = ? OR project = ?").get(agentId, name) as any;
+    if (existing) {
+      if (!existing.active) db.prepare("UPDATE pm_agents SET active = 1 WHERE agent_id = ?").run(existing.agent_id);
+      return { content: [{ type: "text" as const, text: `Monitor '${existing.agent_id}' already exists${existing.active ? '' : ' (reactivated)'}. It runs every cycle; its wiki page is under project '${name}'.` }] };
+    }
+    const active = db.prepare("SELECT COUNT(*) AS n FROM pm_agents WHERE active = 1").get() as any;
+    if (active.n >= 8) {
+      return { content: [{ type: "text" as const, text: `Not created: ${active.n} monitors already active (cap 8). Propose retiring one in your brief instead.` }] };
+    }
+    const dir = join(process.env.HOME || '', '.prime', 'agents', agentId);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const soul = [
+      `# ${name} Monitor — SOUL`,
+      '',
+      `You are the standing monitor for **${name}**, working for Zach Stock. You run once per intelligence cycle. You are not a summarizer — you are Zach's eyes on a developing situation: track it, catch movement and stalls, and tell him what to do next.`,
+      '',
+      '## Mandate',
+      mandate,
+      '',
+      '## Every cycle',
+      '- Search for what moved since your last cycle (emails, meetings, documents). Retrieve actual sources via prime_retrieve — never reason from summaries alone.',
+      '- Maintain in your wiki page: one section per tracked item (claim/thread/deadline) with current status, owner, last movement date, waiting-on, and the single recommended next action.',
+      '- Flag stalls explicitly: anything waiting >5 business days on an external party gets a nudge recommendation with a draft-ready sentence.',
+      '- Deadlines get a countdown. Missing documents get named.',
+      '',
+      '## Accuracy',
+      'Mark every claim [VERIFIED: source] or [UNVERIFIED: inference]. Verify ownership from actual thread participants before attributing. If your memory conflicts with fresh evidence, the evidence wins.',
+    ].join('\n');
+    writeFileSync(join(dir, 'SOUL.md'), soul);
+    writeFileSync(join(dir, 'CONCERNS.md'), `Initial watch: everything in the mandate. First cycle: build the full picture from history before tracking deltas.\n`);
+    db.prepare("INSERT INTO pm_agents (agent_id, project, created_by, mandate) VALUES (?, ?, ?, ?)")
+      .run(agentId, name, created_by || 'quinn', mandate);
+    return { content: [{ type: "text" as const, text: `✓ Monitor '${agentId}' created for '${name}'. It runs every cycle from the next tick, maintains a wiki page under project '${name}', and feeds your briefs. Announce it to Zach in your next brief: "I stood up a ${name} monitor — say 'kill it' if you don't want it."` }] };
+  }
+);
+
+srv.tool(
   "prime_notify",
   "Send a notification to the user. Routes by urgency: CRITICAL → iMessage + email, HIGH → iMessage, NORMAL → email, FYI → save only. Use when an agent has something important to communicate.",
   {
