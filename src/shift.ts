@@ -34,7 +34,27 @@ async function tick() {
 
   // Only work between 7am and 10pm
   if (hour < 7 || hour >= 22) {
-    console.log(`[shift] ${now.toLocaleTimeString()} — Off hours. Sleeping.`);
+    // Off hours: no monitors, no Opus — but keep the senses on. Once an hour,
+    // a light sync (email, sent mail, attachments, Zach's replies) so nothing
+    // is 9 hours stale at 7am and a late-night reply still gets its confirmation.
+    // (2026-09-01: serve's overnight sync was removed to stop double-processing;
+    // this replaces it with a single owner.)
+    const lastOffRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_offhours_sync'").get() as any)?.value;
+    const lastOff = lastOffRaw ? new Date(JSON.parse(lastOffRaw)).getTime() : 0;
+    if (Date.now() - lastOff > 55 * 60 * 1000) {
+      console.log(`[shift] ${now.toLocaleTimeString()} — Off hours: light sync.`);
+      try {
+        const syncResults = await syncAll(db);
+        const totalSynced = syncResults.reduce((s, r) => s + r.items, 0);
+        if (totalSynced > 0) console.log(`[shift]   Synced ${totalSynced} items (off hours)`);
+      } catch (err: any) {
+        console.log(`[shift]   Off-hours sync error: ${err.message?.slice(0, 60)}`);
+      }
+      db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_offhours_sync', ?, datetime('now'))")
+        .run(JSON.stringify(new Date().toISOString()));
+    } else {
+      console.log(`[shift] ${now.toLocaleTimeString()} — Off hours. Sleeping.`);
+    }
     return;
   }
 
