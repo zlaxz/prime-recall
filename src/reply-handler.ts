@@ -1,16 +1,14 @@
 // Reply handler — Zach answers Prime by replying to its emails.
 //
-// Inbound only: reads Zach's own sent mail addressed to quinn@ (service account
-// impersonating Zach, same auth as the sent-mail scan), parses intent, acts on
-// the ledger, and sends a one-line confirmation back IN THREAD (to Zach only —
-// the no-third-party rule holds). Free-text replies become directives Quinn
-// reads next cycle. Runs every sync tick; each message handled exactly once.
+// Transport only: reads Zach's own sent mail addressed to quinn@ (service
+// account impersonating Zach), builds the context of what he replied to, and
+// hands his words to the shared intent layer (src/intent.ts). Sends a one-line
+// confirmation back IN THREAD to Zach only. Each message handled exactly once.
 import Database from 'better-sqlite3';
 import { google } from 'googleapis';
-import { v4 as uuid } from 'uuid';
 import { getServiceAccountAuth, sendEmail } from './connectors/gmail.js';
 import { getProposals, ensureLedger } from './ledger.js';
-import { insertKnowledge } from './db.js';
+import { resolveAndExecute, type IntentContext } from './intent.js';
 
 const ME = 'zach.stock@recaptureinsurance.com';
 const QUINN = 'quinn@recaptureinsurance.com';
@@ -19,33 +17,21 @@ function ensureTable(db: Database.Database) {
   db.exec("CREATE TABLE IF NOT EXISTS processed_replies (message_id TEXT PRIMARY KEY, action TEXT, handled_at TEXT DEFAULT (datetime('now')))");
 }
 
-function bodyText(payload: any): string {
+// Zach's new text only — strip quoted originals across Gmail/Apple Mail/Outlook styles
+export function bodyText(payload: any): string {
   const parts: any[] = [];
   const walk = (p: any) => { if (!p) return; parts.push(p); (p.parts || []).forEach(walk); };
   walk(payload);
   const plain = parts.find(p => p.mimeType === 'text/plain' && p.body?.data);
   const html = parts.find(p => p.mimeType === 'text/html' && p.body?.data);
   let text = plain ? Buffer.from(plain.body.data, 'base64url' as any).toString('utf-8')
-    : html ? Buffer.from(html.body.data, 'base64url' as any).toString('utf-8').replace(/<[^>]+>/g, ' ') : '';
-  // keep only Zach's new text — drop the quoted original
-  text = text.split(/\n\s*On .{5,120} wrote:/)[0].split(/\n>/)[0].split(/\n-{2,}\s*\n/)[0];
+    : html ? Buffer.from(html.body.data, 'base64url' as any).toString('utf-8').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ') : '';
+  const cut = [
+    /\n\s*On .{5,160}? wrote:/s, /\n>/, /\n-{2,}\s*\n/, /\n-+\s*Original Message\s*-+/i,
+    /\nFrom:\s.+\nSent:/i, /\nSent from my (iPhone|iPad|Galaxy)/i, /\n_{5,}/,
+  ];
+  for (const re of cut) { const m = text.match(re); if (m && m.index !== undefined && m.index > 0) text = text.slice(0, m.index); }
   return text.replace(/\s+/g, ' ').trim();
-}
-
-export type ReplyIntent =
-  | { kind: 'accept' | 'decline'; n: number | null; words: string }
-  | { kind: 'done' | 'skip' }
-  | { kind: 'directive'; text: string };
-
-export function parseIntent(text: string): ReplyIntent {
-  const t = text.toLowerCase().trim();
-  const num = t.match(/#\s*(\d)|\b(?:to|proposal|number)\s*(\d)\b|^\s*(\d)\s*$/);
-  const n = num ? parseInt(num[1] || num[2] || num[3], 10) : null;
-  if (/^(yes|accept|approve|go|do it|yes please)\b/.test(t)) return { kind: 'accept', n, words: t };
-  if (/^(no|decline|reject|pass|nope)\b/.test(t)) return { kind: 'decline', n, words: t };
-  if (/^(done|sent|handled|complete|completed|did it|finished)\b/.test(t)) return { kind: 'done' };
-  if (/^(skip|dismiss|drop|kill it|ignore|not now)\b/.test(t)) return { kind: 'skip' };
-  return { kind: 'directive', text: text.slice(0, 1500) };
 }
 
 export async function processReplies(db: Database.Database): Promise<{ handled: number }> {
@@ -60,68 +46,32 @@ export async function processReplies(db: Database.Database): Promise<{ handled: 
     const msg = await gmail.users.messages.get({ userId: 'me', id: m.id!, format: 'full' });
     const headers = Object.fromEntries((msg.data.payload?.headers || []).map((h: any) => [h.name.toLowerCase(), h.value]));
     const subject = String(headers['subject'] || '');
+    const threadId = String(msg.data.threadId || m.id);
     const text = bodyText(msg.data.payload);
     if (!text) { db.prepare("INSERT OR IGNORE INTO processed_replies (message_id, action) VALUES (?, 'empty')").run(m.id); continue; }
-    const intent = parseIntent(text);
-    let confirmation = '';
-    const origSubject = subject.replace(/^(re|fwd?):\s*/i, '').trim();
 
-    if (intent.kind === 'accept' || intent.kind === 'decline') {
-      const open = getProposals(db, 3);
-      let pick: any = null;
-      if (intent.n && intent.n >= 1 && intent.n <= open.length) pick = open[intent.n - 1];
-      if (!pick && open.length === 1) pick = open[0];
-      if (!pick) {
-        const w = intent.words.replace(/^(yes|no|accept|decline|reject|approve|pass|go)\b\s*(to)?\s*/, '');
-        pick = open.find((p: any) => w.length > 6 && String(p.title).toLowerCase().includes(w.slice(0, 30))) || null;
-      }
-      if (pick) {
-        const status = intent.kind === 'accept' ? 'accepted' : 'dismissed';
-        db.prepare("UPDATE ledger SET status=?, updated_at=datetime('now') WHERE id=?").run(status, pick.id);
-        confirmation = intent.kind === 'accept'
-          ? `Got it — accepted: "${pick.title}". ${pick.monitor} will do it on its next cycle; it'll show under CLEARED when done.`
-          : `Got it — declined: "${pick.title}". It won't be re-proposed.`;
-      } else {
-        confirmation = open.length
-          ? `I couldn't tell which proposal you meant. Open ones: ${open.map((p: any, i: number) => `#${i + 1} ${p.title}`).join(' | ')}. Reply "yes to #n".`
-          : `There are no open proposals right now, so I logged your reply as a note for Quinn.`;
-        if (!open.length) saveDirective(db, text, subject);
-      }
-    } else if (intent.kind === 'done' || intent.kind === 'skip') {
-      const row = db.prepare("SELECT id, title FROM ledger WHERE status='open' AND notified_subject = ? ORDER BY notified_at DESC LIMIT 1").get(origSubject) as any;
-      if (row) {
-        const status = intent.kind === 'done' ? 'resolved' : 'dismissed';
-        db.prepare(`UPDATE ledger SET status=?, ${intent.kind === 'done' ? "resolved_at=datetime('now')," : ''} updated_at=datetime('now') WHERE id=?`).run(status, row.id);
-        confirmation = intent.kind === 'done' ? `Got it — marked done: "${row.title}". It'll show under CLEARED tomorrow.` : `Got it — dropped: "${row.title}".`;
-      } else {
-        saveDirective(db, text, subject);
-        confirmation = `Got it — I couldn't match that to a specific action, so I logged it as a note for Quinn.`;
-      }
-    } else {
-      const dtext = (intent as { kind: 'directive'; text: string }).text;
-      saveDirective(db, dtext, subject);
-      confirmation = `Got it — logged for Quinn: "${dtext.slice(0, 120)}${dtext.length > 120 ? '…' : ''}". It's in her next cycle.`;
+    // ── Context: what did he reply to? ──
+    const orig = subject.replace(/^(re|fwd?):\s*/i, '').trim();
+    const kind: 'brief' | 'act' | 'remind' | 'system' | 'other' =
+      /^\[BRIEF\]/i.test(orig) ? 'brief' : /^\[ACT/i.test(orig) ? 'act' : /^\[REMIND/i.test(orig) ? 'remind' : /^\[SYSTEM\]|^MECHANIC/i.test(orig) ? 'system' : 'other';
+    // proposals as numbered in the brief he replied to (snapshot), else current order
+    let proposals: IntentContext['proposals'] = [];
+    const snap = (db.prepare("SELECT value FROM graph_state WHERE key = ?").get(`brief_thread:${threadId}`) as any)?.value;
+    if (snap) {
+      try { proposals = (JSON.parse(snap).proposals || []).map((p: any, i: number) => ({ id: p.id, n: i + 1, title: p.title, monitor: p.monitor })); } catch {}
     }
+    if (!proposals.length) proposals = getProposals(db, 3).map((p: any, i: number) => ({ id: p.id, n: i + 1, title: p.title, monitor: p.monitor }));
+    const inThread = db.prepare("SELECT id FROM ledger WHERE status='open' AND (notified_thread_id = ? OR notified_subject = ?) LIMIT 1").get(threadId, orig) as any;
+    const actions = (db.prepare("SELECT id, title, monitor FROM ledger WHERE tier='act' AND status='open' ORDER BY notified_at IS NULL, notified_at").all() as any[])
+      .map(a => ({ id: a.id, title: a.title, monitor: a.monitor, inThread: !!inThread && inThread.id === a.id }));
+    const briefBody = kind === 'brief' ? String((db.prepare("SELECT value FROM graph_state WHERE key = 'cos_email_body'").get() as any)?.value || '').slice(0, 2500) : undefined;
 
-    db.prepare("INSERT OR IGNORE INTO processed_replies (message_id, action) VALUES (?, ?)").run(m.id, intent.kind);
-    try {
-      await sendEmail(db, { to: ME, subject: `Re: ${origSubject}`.slice(0, 180), body: confirmation, replyToThreadId: msg.data.threadId || undefined });
-    } catch {}
+    const ctx: IntentContext = { channel: 'email-reply', threadKey: threadId, repliedTo: { subject: orig, kind, body: briefBody }, proposals, actions };
+    const { reply, executed } = await resolveAndExecute(db, text, ctx);
+
+    db.prepare("INSERT OR IGNORE INTO processed_replies (message_id, action) VALUES (?, ?)").run(m.id, executed.join(',') || 'none');
+    try { await sendEmail(db, { to: ME, subject: `Re: ${orig}`.slice(0, 180), body: reply, replyToThreadId: threadId }); } catch {}
     handled++;
   }
   return { handled };
-}
-
-function saveDirective(db: Database.Database, text: string, subject: string) {
-  insertKnowledge(db, {
-    id: uuid(),
-    title: `Directive from Zach (email reply): ${text.slice(0, 80)}`,
-    summary: `Zach replied to "${subject}": ${text}`,
-    source: 'directive',
-    source_ref: `reply:${Date.now()}`,
-    source_date: new Date().toISOString(),
-    importance: 'high',
-    provenance: 'primary',
-    tags: ['directive', 'email-reply'],
-  } as any);
 }

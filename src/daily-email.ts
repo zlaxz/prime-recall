@@ -173,6 +173,12 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
       db.prepare(
         "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('cos_email_body', ?, datetime('now'))"
       ).run(focus);
+      try {
+        const props = getProposals(db, 3);
+        if (result.threadId) db.prepare(
+          "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES (?, ?, datetime('now'))"
+        ).run(`brief_thread:${result.threadId}`, JSON.stringify({ sent_at: new Date().toISOString(), proposals: props.map((pr: any) => ({ id: pr.id, title: pr.title, monitor: pr.monitor })) }));
+      } catch {}
       console.log('[quinn-email] Sent: "' + subject.slice(0, 60) + '"');
       return true;
     } else {
