@@ -28,8 +28,10 @@ export function humanTitle(t: string, max = 90): string {
   let s = String(t || '')
     .replace(/\s*\[[a-z0-9-]+-pm\]\s*/gi, ' ')
     .replace(/\s*—\s*(RESOLVED|resolved)\b.*$/i, '')
+    .replace(/\s*[—-]\s*see\s+[a-z0-9-]+\s*$/i, '')                 // "— see baumann-daisy-mota-status"
     .replace(/\s*\((was|cycle|see|per)\b[^)]*\)\s*/gi, ' ')
     .replace(/\b(cycle \d+|item key|ledger)\b/gi, '')
+    .replace(/\bZach's\b/g, 'your').replace(/\bZach\b/g, 'you')     // written for Zach, not about him
     .replace(/\s{2,}/g, ' ').trim();
   if (s.length > max) { s = s.slice(0, max); const sp = s.lastIndexOf(' '); if (sp > max * 0.6) s = s.slice(0, sp); s += '…'; }
   return s;
@@ -45,6 +47,10 @@ export const whenText = (iso: string | null): string => {
   const d = daysFrom(iso); if (d === null) return '';
   return d < 0 ? `${-d} day${-d === 1 ? '' : 's'} overdue` : d === 0 ? 'due today' : d === 1 ? 'due tomorrow' : `due in ${d} days`;
 };
+// "waiting since 2026-05-11" → "waiting 113 days"; leaves other text alone
+export const humanWhy = (why: string): string => String(why || '').replace(/waiting( on (?:you|them))? since (\d{4}-\d{2}-\d{2})/i, (_m, on, iso) => {
+  const d = daysFrom(iso); return d === null ? _m : `waiting${on || ''} ${-d} day${-d === 1 ? '' : 's'}`;
+});
 
 // ── shared shell ──
 const C = { text: '#1a1a1a', muted: '#6b7280', faint: '#9ca3af', accent: '#0f6fff', bg: '#f6f7f9', card: '#ffffff', line: '#e5e7eb', good: '#0a7a3b', warn: '#b45309' };
@@ -95,7 +101,7 @@ export function renderBriefHtml(d: BriefData): string {
     d.actions.forEach((a, i) => inner.push(
       `<div style="padding:10px 14px;margin:6px 0;background:#eef4ff;border-left:4px solid ${C.accent};border-radius:6px;">
         <div style="font-size:15px;font-weight:600;">${i + 1}. ${esc(a.title)}</div>
-        <div style="font-size:13px;color:${C.muted};margin-top:2px;">${esc([a.when, a.why].filter(Boolean).join(' · '))}${a.inInbox ? ` · <span style="color:${C.accent}">draft in your inbox</span>` : ''}</div>
+        <div style="font-size:13px;color:${C.muted};margin-top:2px;">${esc([a.when, humanWhy(a.why)].filter(Boolean).join(' · '))}${a.inInbox ? ` · <span style="color:${C.accent}">draft in your inbox</span>` : ''}</div>
       </div>`));
   }
   if (d.cleared.length) {
@@ -128,7 +134,7 @@ export function renderActionHtml(a: ActionData): string {
   const inner: string[] = [];
   if (a.bump) inner.push(`<div style="font-size:12px;color:${C.warn};font-weight:600;margin-bottom:8px;">Still open after two days — this is the last email about it; the morning brief carries it from here.</div>`);
   inner.push(`<div style="font-size:20px;font-weight:600;line-height:1.3;">${esc(a.title)}</div>`);
-  if (a.when || a.why) inner.push(`<div style="font-size:13px;color:${C.muted};margin:6px 0 16px;">${esc([a.when, a.why].filter(Boolean).join(' · '))}</div>`);
+  if (a.when || a.why) inner.push(`<div style="font-size:13px;color:${C.muted};margin:6px 0 16px;">${esc([a.when, humanWhy(a.why)].filter(Boolean).join(' · '))}</div>`);
   inner.push(`<div style="padding:12px 14px;background:#eef4ff;border-left:4px solid ${C.accent};border-radius:6px;font-size:15px;line-height:1.5;"><b>${a.kind === 'remind' ? 'Heads up' : 'Do this'}:</b> ${esc(a.nextAction || '—')}</div>`);
   if (a.draft) inner.push(`${h('Ready to send — copy from here')}<div style="padding:12px 14px;background:#fafafa;border:1px solid ${C.line};border-radius:6px;font-size:14px;line-height:1.55;white-space:pre-wrap;">${esc(a.draft)}</div>`);
   if (a.links.length) inner.push(`${h('Sources')}${a.links.map(l => `<div style="font-size:13px;padding:3px 0;"><a href="${esc(l.url)}" style="color:${C.accent};text-decoration:none;">${esc(l.label)}</a></div>`).join('')}`);
