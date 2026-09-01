@@ -101,6 +101,10 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
       briefData.cleared = cleared.map((c: any) => ({ title: humanTitle(c.title), file: c.deliverable }));
       const props: any[] = getProposals(db, 3);
       (briefData as any).props = props;
+      try {
+        const { getQuinnApproved } = await import('./ledger.js');
+        briefData.quinnApproved = getQuinnApproved(db).map((q: any) => ({ title: humanTitle(q.title.replace(/^I could\s+/i, ''), 100), from: monitorName(db, q.monitor), why: q.triage_note || '' }));
+      } catch {}
       briefData.proposals = props.map((pr: any, i: number) => ({ n: i + 1, title: humanTitle(pr.title.replace(/^I could\s+/i, ''), 110), from: monitorName(db, pr.monitor) }));
       const dl = db.prepare(
         "SELECT title, deadline FROM ledger WHERE status='open' AND deadline IS NOT NULL AND date(deadline) <= date('now','localtime','+7 days') ORDER BY date(deadline) LIMIT 6"

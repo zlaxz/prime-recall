@@ -63,6 +63,8 @@ export function ensureLedger(db: Database.Database): void {
   try { db.exec("ALTER TABLE ledger ADD COLUMN notified_subject TEXT"); } catch {}
   try { db.exec("ALTER TABLE ledger ADD COLUMN resolved_at TEXT"); } catch {}
   try { db.exec("ALTER TABLE ledger ADD COLUMN deliverable TEXT"); } catch {}
+  try { db.exec("ALTER TABLE ledger ADD COLUMN approved_by TEXT"); } catch {}
+  try { db.exec("ALTER TABLE ledger ADD COLUMN triage_note TEXT"); } catch {}
 }
 
 // LLM output → clean scalar. Headers and single-line fields must never
@@ -95,7 +97,7 @@ export function upsertLedgerRows(db: Database.Database, monitor: string, rows: L
       -- once Zach has been emailed, the dispatch lifecycle owns tier (bump→brief); PM re-emits can't flip it
       tier = CASE WHEN ledger.notified_at IS NOT NULL AND ledger.status = 'open' THEN ledger.tier ELSE @tier END,
       -- Zach's decisions (dismissed/accepted) survive a PM re-emitting the item as open
-      status = CASE WHEN ledger.status IN ('dismissed','accepted') AND @status = 'open' THEN ledger.status ELSE @status END,
+      status = CASE WHEN ledger.status IN ('dismissed','accepted','escalated') AND @status = 'open' THEN ledger.status ELSE @status END,
       notified_at = CASE WHEN ledger.status NOT IN ('open','dismissed','accepted') AND @status = 'open' THEN NULL ELSE ledger.notified_at END,
       bumped_at   = CASE WHEN ledger.status NOT IN ('open','dismissed','accepted') AND @status = 'open' THEN NULL ELSE ledger.bumped_at END,
       resolved_at = CASE WHEN ledger.status = 'open' AND @status = 'resolved' THEN datetime('now') ELSE ledger.resolved_at END,
@@ -113,7 +115,7 @@ export function upsertLedgerRows(db: Database.Database, monitor: string, rows: L
       if (!TIERS.has(tier)) tier = 'brief';
       let status = String(r.status || 'open').trim().toLowerCase();
       if (status === 'closed' || status === 'done' || status === 'complete') status = 'resolved';
-      if (!['open', 'resolved', 'dismissed'].includes(status)) status = 'open';
+      if (!['open', 'resolved', 'dismissed', 'escalated', 'accepted'].includes(status)) status = 'open';
       let ball = String(r.ball || '').trim().toLowerCase();
       if (!['zach', 'other', 'agent'].includes(ball)) ball = '';
       const draft = toText(r.draft);
@@ -150,7 +152,7 @@ export function upsertLedgerRows(db: Database.Database, monitor: string, rows: L
   // Proposals: at most ONE new offer per monitor per cycle (initiative, not spam).
   // Accepted/resolved proposals keep their status via the upsert CASE rules.
   let proposeSeen = 0;
-  const openProposals = (db.prepare("SELECT COUNT(*) n FROM ledger WHERE tier='propose' AND status='open' AND monitor <> ?").get(monitor) as any).n;
+  const openProposals = (db.prepare("SELECT COUNT(*) n FROM ledger WHERE tier='propose' AND status IN ('open','escalated') AND monitor <> ?").get(monitor) as any).n;
   for (const r of cleaned) {
     if (r.tier === 'propose') {
       if (r.status !== 'open') continue;
@@ -260,12 +262,28 @@ export function buildCoverage(db: Database.Database): string[] {
   });
 }
 
-// Staff initiative: what monitors are OFFERING to do. Capped to 3 in surfaces.
+// Staff proposals flow: monitor offers (status 'open') → Quinn triages each cycle →
+// 'accepted' (Quinn approved within her authority, approved_by='quinn'),
+// 'escalated' (needs Zach — this is what the brief shows), or 'dismissed' (with note).
+// Untriaged offers older than 24h auto-escalate so nothing rots unseen.
 export function getProposals(db: Database.Database, limit = 3): any[] {
   ensureLedger(db);
+  db.prepare("UPDATE ledger SET status='escalated', triage_note='auto-escalated: not triaged within 24h', updated_at=datetime('now') WHERE tier='propose' AND status='open' AND created_at < datetime('now','-24 hours')").run();
   return db.prepare(
-    "SELECT id, monitor, item, title, next_action FROM ledger WHERE tier='propose' AND status='open' ORDER BY created_at DESC LIMIT ?"
+    "SELECT id, monitor, item, title, next_action FROM ledger WHERE tier='propose' AND status='escalated' ORDER BY created_at DESC LIMIT ?"
   ).all(limit) as any[];
+}
+export function getUntriagedProposals(db: Database.Database): any[] {
+  ensureLedger(db);
+  return db.prepare("SELECT id, monitor, item, title, next_action, created_at FROM ledger WHERE tier='propose' AND status='open' ORDER BY created_at DESC LIMIT 10").all() as any[];
+}
+export function getQuinnApproved(db: Database.Database, hours = 24): any[] {
+  ensureLedger(db);
+  return db.prepare("SELECT id, monitor, title, triage_note FROM ledger WHERE tier='propose' AND status='accepted' AND approved_by='quinn' AND updated_at >= datetime('now', ?) ORDER BY updated_at DESC LIMIT 5").all(`-${hours} hours`) as any[];
+}
+export const QUINN_APPROVALS_PER_DAY = 2;
+export function quinnApprovalsToday(db: Database.Database): number {
+  return (db.prepare("SELECT COUNT(*) n FROM ledger WHERE tier='propose' AND approved_by='quinn' AND date(updated_at,'localtime') = date('now','localtime')").get() as any).n;
 }
 
 // Compact digest for the morning brief: open actions, stalls, ball lists.
@@ -353,7 +371,7 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
   ].filter(l => l !== null).join('\n');
 
   // proposals expire: an offer nobody took in 7 days is dismissed, not nagged
-  db.prepare("UPDATE ledger SET status='dismissed', updated_at=datetime('now') WHERE tier='propose' AND status='open' AND created_at < datetime('now','-7 days')").run();
+  db.prepare("UPDATE ledger SET status='dismissed', triage_note=COALESCE(triage_note,'') || ' expired', updated_at=datetime('now') WHERE tier='propose' AND status IN ('open','escalated') AND created_at < datetime('now','-7 days')").run();
 
   // New [ACT] notifications, under both caps, most urgent first.
   const room = Math.max(0, Math.min(MAX_OPEN_ACT - openNotified, MAX_NEW_ACT_PER_DAY - todayAct));

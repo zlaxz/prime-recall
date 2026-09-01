@@ -76,6 +76,11 @@ export async function processReplies(db: Database.Database): Promise<{ handled: 
         } catch {}
       }
       if (!proposals.length) proposals = getProposals(db, 3).map((p: any, i: number) => ({ id: p.id, n: i + 1, token: String(p.id).slice(0, 4), title: p.title, monitor: p.monitor }));
+      // Quinn-approved work is also addressable — "no" on it stops it
+      try {
+        const { getQuinnApproved } = await import('./ledger.js');
+        for (const q of getQuinnApproved(db, 48)) proposals.push({ id: q.id, n: 0, token: String(q.id).slice(0, 4), title: `[Quinn approved] ${q.title}`, monitor: q.monitor });
+      } catch {}
 
       // the action in this thread (matched by the subject Zach saw), plus all open/notified actions
       const inThread = db.prepare("SELECT id, title, monitor FROM ledger WHERE status='open' AND notified_subject = ? ORDER BY notified_at DESC LIMIT 1").get(orig) as any;

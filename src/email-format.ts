@@ -76,6 +76,7 @@ export interface BriefData {
   actions: { title: string; why: string; when: string; inInbox: boolean }[];
   cleared: { title: string; file?: string | null }[];
   proposals: { n: number; title: string; from: string }[];
+  quinnApproved?: { title: string; from: string; why: string }[];
   deadlines: { title: string; when: string }[];
   coverage: { name: string; ok: boolean; note: string }[];
   held: number; system: string;
@@ -85,6 +86,7 @@ export function renderBriefText(d: BriefData): string {
   if (d.actions.length) { L.push('YOUR ACTIONS TODAY'); d.actions.forEach((a, i) => L.push(`${i + 1}. ${a.title}${a.when ? ` — ${a.when}` : ''}${a.inInbox ? ' (email in your inbox)' : ''}`)); L.push(''); }
   if (d.cleared.length) { L.push('CLEARED'); d.cleared.forEach(c => L.push(`✓ ${c.title}`)); L.push(''); }
   if (d.proposals.length) { L.push('STAFF PROPOSALS — reply "yes to #1" / "no to #2"'); d.proposals.forEach(pr => L.push(`#${pr.n} ${pr.title} (${pr.from})`)); L.push(''); }
+  if (d.quinnApproved && d.quinnApproved.length) { L.push('QUINN APPROVED (say "no" to stop)'); d.quinnApproved.forEach(q => L.push(`- ${q.title} (${q.from})`)); L.push(''); }
   if (d.deadlines.length) { L.push('DEADLINES'); d.deadlines.forEach(x => L.push(`- ${x.when}: ${x.title}`)); L.push(''); }
   L.push(`Watched: ${d.coverage.map(c => c.ok ? c.name : `${c.name} (${c.note})`).join(' · ')}`);
   L.push(d.system);
@@ -112,6 +114,10 @@ export function renderBriefHtml(d: BriefData): string {
     inner.push(h('Your staff is offering'));
     d.proposals.forEach(pr => inner.push(li(`<b>#${pr.n}</b> ${esc(pr.title)} <span style="color:${C.muted};font-size:12px;">— ${esc(pr.from)}</span>`)));
     inner.push(`<div style="font-size:12px;color:${C.muted};margin-top:6px;">Reply to this email: “yes to #1”, “no to #2”, or just say what you want.</div>`);
+  }
+  if (d.quinnApproved && d.quinnApproved.length) {
+    inner.push(h('Quinn approved (say “no” to stop)'));
+    d.quinnApproved.forEach(q => inner.push(li(`${esc(q.title)} <span style="color:${C.muted};font-size:12px;">— ${esc(q.from)}${q.why ? ` · ${esc(q.why)}` : ''}</span>`)));
   }
   if (d.deadlines.length) {
     inner.push(h('Coming up'));

@@ -692,6 +692,41 @@ srv.tool(
 );
 
 srv.tool(
+  "prime_triage_proposal",
+  "QUINN ONLY. Triage a staff proposal: 'approve' = you authorize the monitor to do it (internal work only: documents, research, watch items — never anything that contacts a third party or spends money; max 2 approvals per day), 'escalate' = it needs Zach's judgment and goes into his brief, 'decline' = not worth doing (give the reason; the monitor will not re-pitch). Everything you approve is announced to Zach in the brief so he can say no.",
+  {
+    proposal_id: z.string().describe("ledger id (or first 8 chars) of the proposal"),
+    decision: z.enum(["approve", "escalate", "decline"]),
+    reason: z.string().describe("One line Zach can read: why"),
+  },
+  async ({ proposal_id, decision, reason }) => {
+    const db = getDb();
+    const { QUINN_APPROVALS_PER_DAY, quinnApprovalsToday } = await import('../ledger.js');
+    const row = db.prepare("SELECT id, title, monitor, status, next_action FROM ledger WHERE tier='propose' AND (id = ? OR id LIKE ? || '%')").get(proposal_id, proposal_id) as any;
+    if (!row) return { content: [{ type: "text" as const, text: `No proposal matching '${proposal_id}'.` }] };
+    if (row.status !== 'open') return { content: [{ type: "text" as const, text: `'${row.title}' is already ${row.status}.` }] };
+    if (decision === 'approve') {
+      if (/email|send|contact|call|wire|pay|sign|submit to|notify (the )?(client|carrier|broker)/i.test(String(row.next_action || '') + ' ' + row.title) && !/draft/i.test(String(row.next_action || ''))) {
+        db.prepare("UPDATE ledger SET status='escalated', triage_note=?, updated_at=datetime('now') WHERE id=?").run(`escalated by rule (outbound/money): ${reason}`.slice(0, 300), row.id);
+        return { content: [{ type: "text" as const, text: `Escalated instead of approved — this touches a third party or money, which is outside your authority. Zach will see it in his brief.` }] };
+      }
+      if (quinnApprovalsToday(db) >= QUINN_APPROVALS_PER_DAY) {
+        db.prepare("UPDATE ledger SET status='escalated', triage_note=?, updated_at=datetime('now') WHERE id=?").run(`escalated: Quinn's daily approval budget used — ${reason}`.slice(0, 300), row.id);
+        return { content: [{ type: "text" as const, text: `Your ${QUINN_APPROVALS_PER_DAY} approvals for today are used — escalated to Zach instead.` }] };
+      }
+      db.prepare("UPDATE ledger SET status='accepted', approved_by='quinn', triage_note=?, updated_at=datetime('now') WHERE id=?").run(reason.slice(0, 300), row.id);
+      return { content: [{ type: "text" as const, text: `Approved: "${row.title}". ${row.monitor} does it next cycle. Announce in your brief: "I approved [X] — say no to stop it."` }] };
+    }
+    if (decision === 'escalate') {
+      db.prepare("UPDATE ledger SET status='escalated', triage_note=?, updated_at=datetime('now') WHERE id=?").run(reason.slice(0, 300), row.id);
+      return { content: [{ type: "text" as const, text: `Escalated to Zach: "${row.title}".` }] };
+    }
+    db.prepare("UPDATE ledger SET status='dismissed', approved_by='quinn', triage_note=?, updated_at=datetime('now') WHERE id=?").run(`declined by Quinn: ${reason}`.slice(0, 300), row.id);
+    return { content: [{ type: "text" as const, text: `Declined: "${row.title}" (${reason}). The monitor will not re-pitch it.` }] };
+  }
+);
+
+srv.tool(
   "prime_notify",
   "Send a notification to the user. Routes by urgency: CRITICAL → iMessage + email, HIGH → iMessage, NORMAL → email, FYI → save only. Use when an agent has something important to communicate.",
   {

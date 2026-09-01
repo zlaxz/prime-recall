@@ -84,6 +84,18 @@ export async function runQuinnAgent(db: Database.Database): Promise<QuinnResult>
       }
     } catch {}
 
+    // Staff proposals awaiting your triage (every cycle)
+    let triageBlock = '';
+    try {
+      const { getUntriagedProposals, quinnApprovalsToday, QUINN_APPROVALS_PER_DAY } = await import('./ledger.js');
+      const pending = getUntriagedProposals(db);
+      if (pending.length) {
+        triageBlock = `## STAFF PROPOSALS AWAITING YOUR TRIAGE (${pending.length}; approvals left today: ${Math.max(0, QUINN_APPROVALS_PER_DAY - quinnApprovalsToday(db))})\n` +
+          pending.map((p: any) => `- id=${String(p.id).slice(0, 8)} [${p.monitor}] ${p.title}\n  plan: ${String(p.next_action || '').slice(0, 220)}`).join('\n') +
+          '\nFor EACH, call prime_triage_proposal: APPROVE internal work that clearly advances an open situation (documents, research, watch items) — never anything that contacts a third party or spends money; ESCALATE what needs Zach\'s judgment, priorities, or authority; DECLINE what is busywork or duplicates existing work. Reason in one line Zach can read. Approvals are announced in your brief ("I approved X — say no to stop it").';
+      }
+    } catch {}
+
     // Build Quinn's prompt — NOT a data dump. Instructions + state + tools.
     const now = new Date();
     const dayName = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][now.getDay()];
@@ -103,6 +115,7 @@ export async function runQuinnAgent(db: Database.Database): Promise<QuinnResult>
       corrections.length > 0 ? `## CORRECTIONS (absolute truth)\n${corrections.map((c: any) => `- ${c.title}`).join('\n')}` : '',
       directives ? `## ZACH SAID SINCE LAST CYCLE (email replies / notes — act on these first; a "monitor request" means evaluate prime_create_monitor per SOUL §10)\n${directives}` : '',
       '',
+      triageBlock,
       rosterReviewDue ? `## WEEKLY ROSTER REVIEW (due now — act on it this cycle)\nYour monitor roster with vitality stats (cap 8):\n${rosterStats}\n\nDECIDE, per SOUL §10: (1) RETIRE any monitor whose situation concluded or has been dormant 3+ weeks (no open items, no movement) via prime_retire_monitor — announce one line in your brief. (2) STAND UP a monitor for any recurring situation in your briefs/ball-lists that nothing owns, via prime_create_monitor. (3) If nothing changes, say "roster reviewed — no changes" in your brief. This review recurs weekly.` : '',
       '',
       '## YOUR TASK',
