@@ -32,10 +32,20 @@ export function exportCommandCenter(db = getDb()): void {
   const mech = (db.prepare("SELECT COUNT(*) n FROM knowledge WHERE source='mechanic-report' AND created_at >= datetime('now','-1 day')").get() as any).n;
   const issues = db.prepare("SELECT substr(id,1,8) i, status, substr(replace(observation, char(10), ' '),1,90) o FROM system_issues WHERE status IN ('open','dispatched','needs-zach','stalled') ORDER BY updated_at DESC LIMIT 6").all() as any[];
 
+  // claude:// deep links — the direct bridge from Prime's state into Claude
+  // Desktop: one click opens Quinn (chat) or a Cowork session with this file
+  // attached and the action pre-filled. Laptop path is the target.
+  const TODAY_PATH = '/Users/zstoc/Documents/Claude/Prime/TODAY.md';
+  const quinnLink = (r: any) => 'claude://claude.ai/new?q=' + encodeURIComponent(
+    `You are Quinn (Prime relay). Help me with this action: "${r.title}". Next step on file: ${r.next_action || 'n/a'}. Use prime tools to pull the sources, then give me one recommendation.`);
+  const coworkLink = (r: any) => 'claude://cowork/new?q=' + encodeURIComponent(
+    `Work this Prime action end to end: "${r.title}". Next step: ${r.next_action || 'n/a'}. Read the attached TODAY.md for context. Do not send email to anyone — draft only.`)
+    + '&file=' + encodeURIComponent(TODAY_PATH);
+
   const today: string[] = [
     `# Prime — Today`, ``, `_Updated ${now} (regenerates hourly; source of truth is the Mini)_`, ``,
     `## Open actions (each has an [ACT] email)`,
-    ...(open.length ? open.map(r => `- **${r.title}** [${r.monitor}]${r.deadline ? ` — due ${r.deadline}` : ''}${r.notified_at ? '' : ' _(queued)_'}${r.next_action ? `\n  - Next: ${r.next_action}` : ''}`) : ['- none']),
+    ...(open.length ? open.map(r => `- **${r.title}** [${r.monitor}]${r.deadline ? ` — due ${r.deadline}` : ''}${r.notified_at ? '' : ' _(queued)_'}${r.next_action ? `\n  - Next: ${r.next_action}` : ''}\n  - [Ask Quinn](${quinnLink(r)}) · [Work it in Cowork](${coworkLink(r)})`) : ['- none']),
     ``, `## Deadlines ahead`,
     ...(reminds.length ? reminds.map(r => `- ${r.deadline} (${days(r.deadline) === '?' ? '?' : -1 * (days(r.deadline) as number)}d): ${r.title}`) : ['- none tracked']),
     ``, `## Cleared (last 48h)`,
