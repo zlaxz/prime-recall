@@ -240,7 +240,7 @@ fi
 # ── 7b. DeepSeek API balance ───────────────────────────
 DS_KEY=$(grep '^DEEPSEEK_API_KEY=' "$PRIME_DIR/.env" 2>/dev/null | cut -d= -f2-)
 if [ -n "$DS_KEY" ]; then
-  DS_BAL=$(curl -s --max-time 10 https://api.deepseek.com/user/balance -H "Authorization: Bearer $DS_KEY" 2>/dev/null)
+  DS_BAL=$(printf 'header = "Authorization: Bearer %s"\n' "$DS_KEY" | curl -s --max-time 10 -K - https://api.deepseek.com/user/balance 2>/dev/null)
   if echo "$DS_BAL" | grep -q '"is_available":true'; then
     clear_alert "$MSG_DEEPSEEK"
   else
