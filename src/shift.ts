@@ -394,27 +394,33 @@ async function tick() {
   console.log(`[shift] ${now.toLocaleTimeString()} — Tick complete.`);
 }
 
+// Full cycles run 40-90 min > the 15-min interval; overlapping ticks
+// double-run syncs/PMs and drive the heap toward the 8GB OOM (audit 2026-08-31).
+async function guardedTick() {
+  if (tickInFlight) { console.log('[shift] Tick skipped — previous tick still running.'); return; }
+  tickInFlight = true;
+  try {
+    await tick();
+  } catch (err: any) {
+    console.error(`[shift] Tick error: ${err.message}`);
+  } finally {
+    tickInFlight = false;
+  }
+}
+
 // ── Main loop ──
 async function main() {
   console.log(`[shift] Prime Shift Daemon starting. Active hours: 7am-10pm. Cycle: ${CYCLE_INTERVAL / 60000} min.`);
 
-  // Run immediately on start
-  await tick();
+  // Run immediately on start. Must go through the same guard as the interval
+  // below — if this lands during the full-cycle gate window it can run 40-90
+  // min, and without the guard the interval fires every 15 min regardless,
+  // stacking 5-6 concurrent syncs/PM-agent-runs on top of it (the exact
+  // startup-vs-interval gap the 2026-08-31 re-entrancy guard didn't cover).
+  await guardedTick();
 
   // Then loop
-  setInterval(async () => {
-    // Full cycles run 40-55 min > the 15-min interval; overlapping ticks
-    // double-run syncs/PMs and drive the heap toward the 8GB OOM (audit 2026-08-31).
-    if (tickInFlight) { console.log('[shift] Tick skipped — previous tick still running.'); return; }
-    tickInFlight = true;
-    try {
-      await tick();
-    } catch (err: any) {
-      console.error(`[shift] Tick error: ${err.message}`);
-    } finally {
-      tickInFlight = false;
-    }
-  }, CYCLE_INTERVAL);
+  setInterval(guardedTick, CYCLE_INTERVAL);
 }
 
 main().catch(err => {
