@@ -33,6 +33,7 @@ const MAX_OPEN_ACT = 3;        // open [ACT] emails in Zach's inbox at once
 const MAX_NEW_ACT_PER_DAY = 2; // new [ACT] emails per local day
 const MAX_REMIND_PER_DAY = 2;  // [REMIND] emails per local day
 const MAX_ACT_PER_MONITOR = 2; // act-tier rows accepted per monitor per upsert
+const MAX_OPEN_PROPOSALS = 3;  // total open offers across ALL monitors — the brief shows 3; a pool of 7 is sprawl
 const BUMP_AFTER_HOURS = 48;   // one bump, then demote to brief
 
 export function ensureLedger(db: Database.Database): void {
@@ -149,11 +150,14 @@ export function upsertLedgerRows(db: Database.Database, monitor: string, rows: L
   // Proposals: at most ONE new offer per monitor per cycle (initiative, not spam).
   // Accepted/resolved proposals keep their status via the upsert CASE rules.
   let proposeSeen = 0;
+  const openProposals = (db.prepare("SELECT COUNT(*) n FROM ledger WHERE tier='propose' AND status='open' AND monitor <> ?").get(monitor) as any).n;
   for (const r of cleaned) {
     if (r.tier === 'propose') {
       if (r.status !== 'open') continue;
       proposeSeen++;
-      if (proposeSeen > 1) r.tier = 'wiki';
+      // one new offer per monitor per cycle, and no more than 3 open system-wide;
+      // excess offers become wiki notes (the monitor can re-offer when a slot frees)
+      if (proposeSeen > 1 || openProposals + proposeSeen > MAX_OPEN_PROPOSALS) r.tier = 'wiki';
     }
   }
 
