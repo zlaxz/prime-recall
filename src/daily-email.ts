@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import { readFileSync , readdirSync } from 'fs';
 import { join } from 'path';
 import { sendEmail } from './connectors/gmail.js';
+import { buildCoverage, getProposals } from './ledger.js';
 
 // ============================================================
 // Quinn's Daily Email — sends FOCUS.md as an email to Zach
@@ -103,6 +104,15 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
         }
         // actual completions in 24h, not roster size — the heartbeat must not
         // read "7 monitors ran" on a morning when zero did (audit finding)
+        try {
+          const cov: string[] = buildCoverage(db);
+          if (cov.length) { lines.push('', 'STAFF COVERAGE (who watched what):'); for (const c of cov) lines.push(`  ${c}`); }
+          const props: any[] = getProposals(db, 3);
+          if (props.length) {
+            lines.push('', 'STAFF PROPOSALS (tell Quinn or Claude "yes to #n" / "no to #n"):');
+            props.forEach((pr: any, i: number) => lines.push(`  #${i + 1} ${pr.title} [${pr.monitor}]`));
+          }
+        } catch {}
         const monitors = (db.prepare("SELECT COUNT(*) n FROM agent_state WHERE agent_type='pm' AND last_run_at >= datetime('now','-1 day')").get() as any)?.n ?? '?';
         const mech = db.prepare(
           "SELECT COUNT(*) n FROM knowledge WHERE source='mechanic-report' AND created_at >= datetime('now','-1 day')"

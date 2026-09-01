@@ -664,6 +664,33 @@ srv.tool(
 );
 
 srv.tool(
+  "prime_accept_proposal",
+  "Accept a staff proposal (a 'propose'-tier ledger item shown as 'STAFF PROPOSALS #n' in the brief or TODAY.md). The proposing monitor executes it on its next cycle and reports it under CLEARED. Identify by the #n shown, or by words from the title.",
+  {
+    which: z.string().describe("The proposal number as shown ('#2' or '2') or distinctive words from its title"),
+    decline: z.boolean().optional().describe("true to DECLINE instead of accept"),
+  },
+  async ({ which, decline }) => {
+    const db = getDb();
+    const { getProposals } = await import('../ledger.js');
+    const open = getProposals(db, 3);
+    if (!open.length) return { content: [{ type: "text" as const, text: "No open staff proposals right now." }] };
+    const n = parseInt(String(which).replace('#', ''), 10);
+    let pick = (!isNaN(n) && n >= 1 && n <= open.length) ? open[n - 1] : null;
+    if (!pick) {
+      const w = String(which).toLowerCase();
+      pick = open.find((p: any) => String(p.title).toLowerCase().includes(w)) || null;
+    }
+    if (!pick) return { content: [{ type: "text" as const, text: `Couldn't match "${which}". Open proposals: ${open.map((p: any, i: number) => `#${i + 1} ${p.title}`).join(' | ')}` }] };
+    const status = decline ? 'dismissed' : 'accepted';
+    db.prepare("UPDATE ledger SET status=?, updated_at=datetime('now') WHERE id=?").run(status, pick.id);
+    return { content: [{ type: "text" as const, text: decline
+      ? `Declined: "${pick.title}". ${pick.monitor} will not re-propose it.`
+      : `Accepted: "${pick.title}". ${pick.monitor} will do it on its next cycle (within ~4h) and it will show under CLEARED when done.` }] };
+  }
+);
+
+srv.tool(
   "prime_notify",
   "Send a notification to the user. Routes by urgency: CRITICAL → iMessage + email, HIGH → iMessage, NORMAL → email, FYI → save only. Use when an agent has something important to communicate.",
   {

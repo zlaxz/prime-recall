@@ -99,7 +99,7 @@ export function upsertLedgerRows(db: Database.Database, monitor: string, rows: L
   // Normalize + gate before writing. Monitors over-produce act rows (observed
   // day one: 6 from one monitor), so tier discipline is enforced here, not
   // just in the prompt.
-  const TIERS = new Set(['act', 'remind', 'brief', 'wiki']);
+  const TIERS = new Set(['act', 'remind', 'brief', 'wiki', 'propose']);
   const cleaned = rows
     .filter(r => r && r.item && r.title)
     .map(r => {
@@ -138,6 +138,17 @@ export function upsertLedgerRows(db: Database.Database, monitor: string, rows: L
         tier, status, links: linksJson,
       };
     });
+
+  // Proposals: at most ONE new offer per monitor per cycle (initiative, not spam).
+  // Accepted/resolved proposals keep their status via the upsert CASE rules.
+  let proposeSeen = 0;
+  for (const r of cleaned) {
+    if (r.tier === 'propose') {
+      if (r.status !== 'open') continue;
+      proposeSeen++;
+      if (proposeSeen > 1) r.tier = 'wiki';
+    }
+  }
 
   // Per-monitor act cap: keep the most time-anchored, demote the rest.
   const acts = cleaned.filter(r => r.tier === 'act' && r.status === 'open');
@@ -190,6 +201,38 @@ export function getBallLists(db: Database.Database, windowDays = 45, cap = 10): 
     .sort((a, b) => a.sd.localeCompare(b.sd)).slice(0, cap)
     .map(r => `"${String(r.subj).slice(0, 70)}" — no reply in ${days(r.sd)}d`);
   return { youOwe, waitingOn };
+}
+
+// Proof of attention: one line per active monitor — when it ran, what's open,
+// what it's watching, when its slice last moved. Deterministic from the DB.
+export function buildCoverage(db: Database.Database): string[] {
+  ensureLedger(db);
+  const rel = (d: string | null) => {
+    if (!d) return 'never';
+    const h = Math.floor((Date.now() - new Date(d + (d.endsWith('Z') || d.includes('+') ? '' : 'Z')).getTime()) / 3600000);
+    return h < 1 ? 'just now' : h < 48 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
+  };
+  const monitors = db.prepare(
+    "SELECT p.agent_id, p.project, a.last_run_at FROM pm_agents p LEFT JOIN agent_state a ON a.subject_id = p.project AND a.agent_type='pm' WHERE p.active=1 ORDER BY p.created_at"
+  ).all() as any[];
+  return monitors.map((m: any) => {
+    const st = db.prepare(
+      "SELECT COUNT(*) n, MAX(updated_at) mx FROM ledger WHERE monitor=? AND status='open' AND tier IN ('act','remind')"
+    ).get(m.agent_id) as any;
+    const top = db.prepare(
+      "SELECT title, deadline, ball_since FROM ledger WHERE monitor=? AND status='open' AND tier IN ('act','remind') ORDER BY deadline IS NULL, deadline, ball_since LIMIT 1"
+    ).get(m.agent_id) as any;
+    const watching = top ? ` · watching: ${String(top.title).slice(0, 60)}` : ' · nothing urgent';
+    return `${m.project} — ran ${rel(m.last_run_at)} · ${st.n} open · last movement ${rel(st.mx)}${watching}`;
+  });
+}
+
+// Staff initiative: what monitors are OFFERING to do. Capped to 3 in surfaces.
+export function getProposals(db: Database.Database, limit = 3): any[] {
+  ensureLedger(db);
+  return db.prepare(
+    "SELECT id, monitor, item, title, next_action FROM ledger WHERE tier='propose' AND status='open' ORDER BY created_at DESC LIMIT ?"
+  ).all(limit) as any[];
 }
 
 // Compact digest for the morning brief: open actions, stalls, ball lists.
@@ -266,6 +309,9 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
     'No reply needed — when you act, the monitor sees your sent mail and closes this out.',
     'To drop it: tell Quinn or Claude to dismiss it.',
   ].filter(l => l !== null).join('\n');
+
+  // proposals expire: an offer nobody took in 7 days is dismissed, not nagged
+  db.prepare("UPDATE ledger SET status='dismissed', updated_at=datetime('now') WHERE tier='propose' AND status='open' AND created_at < datetime('now','-7 days')").run();
 
   // New [ACT] notifications, under both caps, most urgent first.
   const room = Math.max(0, Math.min(MAX_OPEN_ACT - openNotified, MAX_NEW_ACT_PER_DAY - todayAct));

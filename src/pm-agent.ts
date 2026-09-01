@@ -161,6 +161,18 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   const dayName = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][now.getDay()];
   const dateStr = `${dayName}, ${now.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
 
+  // Proposals Zach accepted → this cycle's work orders for this monitor
+  let acceptedBlock = '';
+  try {
+    const { ensureLedger } = await import('./ledger.js');
+    ensureLedger(db);
+    const acc = db.prepare("SELECT item, title, next_action FROM ledger WHERE monitor=? AND tier='propose' AND status='accepted'").all(config.agentId) as any[];
+    if (acc.length) {
+      acceptedBlock = '## ACCEPTED PROPOSALS — DO THESE THIS CYCLE\n' + acc.map((a: any) => `- [${a.item}] ${a.title}\n  Plan: ${a.next_action || ''}`).join('\n') +
+        '\nExecute each within your walls (documents go in your wiki page, drafts in the ledger draft field, research into the wiki). When done, re-emit the item in your LEDGER block with "status":"resolved" and put a one-line summary in MEMORY_UPDATE.';
+    }
+  } catch {}
+
   const prompt = [
     soul || `You are the PM for ${config.project}.`,
     '',
@@ -169,6 +181,7 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     memory ? `## WHAT I REMEMBER\n${memory}\n` : '',
     concerns ? `## WHAT I'M WATCHING\n${concerns}\n` : '',
     lastWikiPage ? `## MY LAST WIKI PAGE\n${lastWikiPage.slice(0, 3000)}\n` : '',
+    acceptedBlock,
     '',
     'You have MCP tools. Use them to investigate what\'s new since your last cycle.',
     'Search for recent emails, check commitments, check the calendar.',
@@ -197,6 +210,7 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     '(JSON array of ball-in-play items for your domain — the structured version of your wiki. Each: {"item":"stable-key-that-matches-prior-cycles","title":"short human line","counterparty":"who","state":"where it stands","ball":"zach|other","ball_since":"YYYY-MM-DD","deadline":"YYYY-MM-DD or null","next_action":"one concrete step","draft":"ready-to-send text or null","tier":"act|remind|brief|wiki","status":"open|resolved"}.',
     'TIER RULES — tier "act" ONLY when ALL THREE hold: a finished draft is attached, delay costs something real (deadline/stall/money/legal), and only Zach can do it. Deadline-shaped with no decision → "remind". Awareness only → "brief". Something YOU watch → "wiki". Overuse of "act" makes every alert meaningless.',
     'ATTACHMENTS: search results with source attachment-index are document CARDS (dec pages, signed agreements, loss runs, filings). When a task turns on what a document actually says, call prime_read_attachment with the card\'s message_id and filename to read it live. Cite documents you read as [VERIFIED: attachment:message_id:filename].',
+    'PROPOSALS RULE: you may include at most ONE ledger item per cycle with "tier":"propose" — an OFFER of something you COULD do for Zach beyond your current instructions: a document (claim chronology, renewal package, comparison sheet), a research task, a new watch item, a draft he did not ask for. Title it as an offer ("I could build…"), put the concrete plan in next_action, ball "agent", no deadline. Never propose sending anything to a third party. Do not re-propose something already declined.',
     'RESOURCES RULE: every act/remind item should include "links": [{"label":"...","url":"..."}] — up to 4. Convert the thread ids you cite into Gmail deep links: https://mail.google.com/mail/u/0/#all/THREAD_ID (drop the "thread:" prefix). CRITICALLY: hunt for the artifact that would COMPLETE the task (the policy document, the filing portal, the attachment) — link the email that carries it, a Drive URL if one appears in the record, or the official portal URL if one is cited in the sources. If the completing artifact does NOT exist in the record after searching, say so explicitly in next_action ("searched: no renewed dec page exists in email history") — a verified absence is decisive information.',
     'CLOSURE BY OBSERVATION: before emitting an item, search Zach\'s sent mail (source gmail-sent) — if he already took the recommended action, set status "resolved". Keep item keys stable so updates match.)',
   ].filter(Boolean).join('\n');

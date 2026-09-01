@@ -3,7 +3,7 @@
 // Mini each hourly block; the laptop's sync script pulls ~/.prime/export/.
 import Database from 'better-sqlite3';
 import { getDb } from './db.js';
-import { getBallLists } from './ledger.js';
+import { getBallLists, buildCoverage, getProposals } from './ledger.js';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -57,6 +57,10 @@ export function exportCommandCenter(db: Database.Database = getDb()): void {
     ...(cleared.length ? cleared.map(c => `- ✅ ${c.title} [${c.monitor}]`) : ['- nothing yet']),
     ``, `## Stalling (emailed + bumped, no movement)`,
     ...(stalling.length ? stalling.map(s => `- ⚠️ ${s.title} [${s.monitor}]`) : ['- none']),
+    ``, `## Staff coverage (who watched what)`,
+    ...buildCoverage(db).map(c => `- ${c}`),
+    ``, `## Staff proposals (say "yes to #n" to Quinn or Claude)`,
+    ...(() => { const ps = getProposals(db, 3); return ps.length ? ps.map((pr, i) => `- **#${i + 1} ${pr.title}** [${pr.monitor}]${pr.next_action ? ` — ${pr.next_action.slice(0, 160)}` : ''}`) : ['- none right now']; })(),
     ``, `## You owe a response`,
     ...(youOwe.length ? youOwe.map(l => `- ${l}`) : ['- clear']),
     ``, `## Waiting on them`,
