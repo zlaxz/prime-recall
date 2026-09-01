@@ -162,6 +162,15 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
     console.log('  Attachment index failed: ' + (err.message || '').slice(0, 80));
   }
 
+  // Zach's replies to Prime's emails (yes/no #n, done, skip, free text) — inbound only
+  try {
+    const { processReplies } = await import('../reply-handler.js');
+    const rep = await processReplies(db);
+    if (rep.handled) console.log(`  Replies: ${rep.handled} handled`);
+  } catch (err: any) {
+    console.log('  Reply handler failed: ' + (err.message || '').slice(0, 80));
+  }
+
     // ── TEAM MEMBER SYNC (via service account) ──
   // Sync Gmail + Calendar for non-CEO team members using domain-wide delegation
   try {
