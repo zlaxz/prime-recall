@@ -288,13 +288,13 @@ export async function scanGmail(
         subject: td.subject,
         last_from: td.lastFrom,
         days_since_last: td.lastDate ? Math.floor((Date.now() - new Date(td.lastDate).getTime()) / 86400000) : 0,
-        waiting_on_user: !td.lastFrom.toLowerCase().includes(userEmail.toLowerCase()),
+        waiting_on_user: !isSelfSender(td.lastFrom),
         updated_for_reply: true,
       };
 
       // Update tags: if latest message is not from user, mark awaiting_reply
       const existingTags = typeof meta.tags === 'string' ? JSON.parse(meta.tags || '[]') : [];
-      const lastFromIsUser = td.lastFrom.toLowerCase().includes(userEmail.toLowerCase());
+      const lastFromIsUser = isSelfSender(td.lastFrom);
       let newTags = (Array.isArray(existingTags) ? existingTags : []).filter((t: string) => t !== 'awaiting_reply');
       if (!lastFromIsUser) newTags.push('awaiting_reply');
 
@@ -377,7 +377,7 @@ export async function scanGmail(
       const embText = `${ext.title}\n${ext.summary}`;
       const embedding = await generateEmbedding(embText, apiKey);
 
-      const lastFromIsUser = td.lastFrom.toLowerCase().includes(userEmail.toLowerCase());
+      const lastFromIsUser = isSelfSender(td.lastFrom);
       const daysSinceLastMessage = Math.floor((Date.now() - new Date(td.lastDate).getTime()) / 86400000);
 
       // Skip noise items (extraction identified as automated/marketing)
@@ -782,6 +782,10 @@ export async function scanSentMail(
 // Send Email — Execution Engine Phase A1
 // ============================================================
 
+// Zach's own sending identities — a self-forward is never "waiting on Zach"
+export const SELF_SENDER = /zach\.stock@recaptureinsurance|zstock@stockinsgroup|zstockco@gmail/i;
+export const isSelfSender = (from: string) => SELF_SENDER.test(String(from || ''));
+
 export async function sendEmail(
   db: Database.Database,
   options: {
@@ -793,6 +797,7 @@ export async function sendEmail(
     replyToThreadId?: string;  // reply to existing thread
     html?: boolean;
     from?: string;  // default: quinn@recaptureinsurance.com
+    inReplyTo?: string;  // RFC Message-ID of the mail being answered — threads in the RECIPIENT's mailbox
   }
 ): Promise<{ success: boolean; messageId?: string; threadId?: string; error?: string }> {
   // Use service account for sending (domain-wide delegation with gmail.send scope)
@@ -801,9 +806,17 @@ export async function sendEmail(
   const cleanHeader = (v?: string) => (v || '').replace(/[\r\n]+/g, ' ').trim();
   // Non-ASCII in a raw RFC2822 header renders as mojibake (Â· â€") in most
   // clients — RFC 2047 encoded-words are required. Body is fine (charset=utf-8).
-  const encodeHeader = (v: string) => /[^\x20-\x7E]/.test(v)
-    ? '=?UTF-8?B?' + Buffer.from(v, 'utf-8').toString('base64') + '?='
-    : v;
+  // RFC 2047 §2: each encoded-word ≤ 75 chars → chunk on character boundaries
+  const encodeHeader = (v: string) => {
+    if (!/[^\x20-\x7E]/.test(v)) return v;
+    const words: string[] = []; let chunk = '';
+    for (const ch of v) {
+      if (Buffer.byteLength(chunk + ch, 'utf-8') > 45) { words.push(chunk); chunk = ''; }
+      chunk += ch;
+    }
+    if (chunk) words.push(chunk);
+    return words.map(w => '=?UTF-8?B?' + Buffer.from(w, 'utf-8').toString('base64') + '?=').join('\r\n ');
+  };
   options = { ...options, to: cleanHeader(options.to), subject: cleanHeader(options.subject),
     cc: options.cc ? cleanHeader(options.cc) : undefined, bcc: options.bcc ? cleanHeader(options.bcc) : undefined };
   const fromEmail = options.from || 'quinn@recaptureinsurance.com';
@@ -824,6 +837,8 @@ export async function sendEmail(
     options.cc ? `Cc: ${options.cc}` : null,
     options.bcc ? `Bcc: ${options.bcc}` : null,
     `Subject: ${encodeHeader(options.subject)}`,
+    options.inReplyTo ? `In-Reply-To: ${cleanHeader(options.inReplyTo)}` : null,
+    options.inReplyTo ? `References: ${cleanHeader(options.inReplyTo)}` : null,
     'MIME-Version: 1.0',
     `Content-Type: ${contentType}; charset=utf-8`,
   ].filter(h => h !== null).join('\r\n');
@@ -846,8 +861,8 @@ export async function sendEmail(
     // System emails ([ACT]/[REMIND]/[PRIME HEALTH]/MECHANIC/briefs to Zach) must NOT be
     // logged as primary gmail-sent — monitors search gmail-sent for closure evidence,
     // and Quinn's own alert about an action must never count as the action (audit 2026-08-31).
-    const isSystemEmail = options.to.includes('zach.stock@recaptureinsurance') &&
-      (options.subject?.includes('Brief') || /^\[/.test(options.subject || '') || /^MECHANIC /.test(options.subject || ''));
+    // Anything quinn@ sends to Zach alone is a system email — never closure evidence
+    const isSystemEmail = fromEmail === 'quinn@recaptureinsurance.com' && /zach\.stock@recaptureinsurance/i.test(options.to) && !/,/.test(options.to);
     const { v4: uuidv4 } = await import('uuid');
     insertKnowledge(db, {
       id: uuidv4(),

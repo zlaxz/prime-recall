@@ -177,7 +177,10 @@ async function runClaudeViaProxyCurl(jsonBody: string, timeoutSec: number): Prom
     try {
       const parsed = JSON.parse(stdout);
       if (parsed.error) throw new Error(`Proxy error: ${parsed.error}`);
-      return parsed.result || stdout;
+      if (parsed.exit_code !== undefined && parsed.exit_code !== 0) {
+      throw new Error(`Proxy exit_code ${parsed.exit_code}: ${String(parsed.result || '').slice(0, 160)}`);
+    }
+    return parsed.result || stdout;
     } catch (parseErr: any) {
       if (stdout.includes('error')) throw new Error(`Proxy: ${stdout.slice(0, 200)}`);
       return stdout;

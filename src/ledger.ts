@@ -90,9 +90,13 @@ export function upsertLedgerRows(db: Database.Database, monitor: string, rows: L
     VALUES (@id, @monitor, @item, @title, @counterparty, @state, @ball, @ball_since, @deadline, @next_action, @draft, @tier, @status, @links)
     ON CONFLICT(monitor, item) DO UPDATE SET
       title=@title, counterparty=@counterparty, state=@state, ball=@ball, ball_since=@ball_since,
-      deadline=@deadline, next_action=@next_action, draft=@draft, tier=@tier, status=@status, links=@links,
-      notified_at = CASE WHEN ledger.status <> 'open' AND @status = 'open' THEN NULL ELSE ledger.notified_at END,
-      bumped_at   = CASE WHEN ledger.status <> 'open' AND @status = 'open' THEN NULL ELSE ledger.bumped_at END,
+      deadline=@deadline, next_action=@next_action, draft=@draft, links=@links,
+      -- once Zach has been emailed, the dispatch lifecycle owns tier (bump→brief); PM re-emits can't flip it
+      tier = CASE WHEN ledger.notified_at IS NOT NULL AND ledger.status = 'open' THEN ledger.tier ELSE @tier END,
+      -- Zach's decisions (dismissed/accepted) survive a PM re-emitting the item as open
+      status = CASE WHEN ledger.status IN ('dismissed','accepted') AND @status = 'open' THEN ledger.status ELSE @status END,
+      notified_at = CASE WHEN ledger.status NOT IN ('open','dismissed','accepted') AND @status = 'open' THEN NULL ELSE ledger.notified_at END,
+      bumped_at   = CASE WHEN ledger.status NOT IN ('open','dismissed','accepted') AND @status = 'open' THEN NULL ELSE ledger.bumped_at END,
       resolved_at = CASE WHEN ledger.status = 'open' AND @status = 'resolved' THEN datetime('now') ELSE ledger.resolved_at END,
       updated_at=datetime('now')
   `);
@@ -185,11 +189,15 @@ export function getBallLists(db: Database.Database, windowDays = 45, cap = 10): 
            MAX(source_date) sd
     FROM knowledge
     WHERE source = 'gmail' AND json_extract(metadata,'$.thread_id') IS NOT NULL
+      AND (source_account IS NULL OR source_account = 'zach.stock@recaptureinsurance.com')
     GROUP BY tid
     HAVING sd >= datetime('now', ?)
   `).all(`-${windowDays} days`) as any[];
   const days = (sd: string) => Math.floor((Date.now() - new Date(sd).getTime()) / 86400000);
+  const SELF = /zach\.stock@recaptureinsurance|zstock@stockinsgroup|zstockco@gmail/i;
   const clean = rows.filter(r => !NOISE.test(String(r.last_from || '')) && !NOISE.test(String(r.subj || '')));
+  // a thread whose last sender is Zach himself (any alias) can't be "you owe"
+  for (const r of clean) if ((r.wou === 1 || r.wou === true) && SELF.test(String(r.last_from || ''))) r.wou = 0;
   // youOwe: newest first — what Zach owes NOW, not the stale edge of the window
   const youOwe = clean
     .filter(r => r.wou === 1 || r.wou === true)
@@ -207,8 +215,8 @@ export function getBallLists(db: Database.Database, windowDays = 45, cap = 10): 
 }
 
 // Learning loop (demote-only, deliberately): if Zach dismissed a monitor's last
-// two act-tier items and resolved none in 30 days, that monitor's actions stop
-// emailing him for 14 days — they stay in the brief. Promotion is left to the
+// two act-tier items and resolved none in a rolling 30-day window, that
+// monitor's actions stop emailing him — they stay in the brief. Promotion is left to the
 // weekly roster review; asymmetric risk favors quieter, not louder.
 export function mutedMonitors(db: Database.Database): string[] {
   ensureLedger(db);
@@ -242,7 +250,9 @@ export function buildCoverage(db: Database.Database): string[] {
     ).get(m.agent_id) as any;
     const watching = top ? ` · watching: ${String(top.title).slice(0, 60)}` : ' · nothing urgent';
     const muted = mutedMonitors(db).includes(m.agent_id) ? ' · MUTED (you skipped its last actions — brief only)' : '';
-    return `${m.project} — ran ${rel(m.last_run_at)} · ${st.n} open · last movement ${rel(st.mx)}${watching}${muted}`;
+    const acc = (db.prepare("SELECT COUNT(*) n FROM ledger WHERE monitor=? AND tier='propose' AND status='accepted'").get(m.agent_id) as any).n;
+    const accepted = acc ? ` · ${acc} accepted proposal${acc === 1 ? '' : 's'} pending` : '';
+    return `${m.project} — ran ${rel(m.last_run_at)} · ${st.n} open · last movement ${rel(st.mx)}${watching}${muted}${accepted}`;
   });
 }
 
@@ -299,11 +309,13 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
   ).get() as any).n;
   // overdue must SAY overdue — clamping to "0d left" inverts the point
   const daysTag = (deadline: string | null): string | null => {
-    if (!deadline) return null;
-    const t = new Date(deadline).getTime();
-    if (isNaN(t)) return null;
-    const d = Math.ceil((t - Date.now()) / 86400000);
-    return d < 0 ? `OVERDUE ${-d}d` : `${d}d left`;
+    if (!deadline || !/^\d{4}-\d{2}-\d{2}/.test(deadline)) return null;
+    // calendar dates compare as LOCAL days — the evening of the due date is "today", not overdue
+    const dl = new Date(deadline.slice(0, 10) + 'T00:00:00');
+    if (isNaN(dl.getTime())) return null;
+    const n = new Date(); const today = new Date(n.getFullYear(), n.getMonth(), n.getDate());
+    const d = Math.round((dl.getTime() - today.getTime()) / 86400000);
+    return d < 0 ? `OVERDUE ${-d}d` : d === 0 ? 'due today' : `${d}d left`;
   };
 
   const subj = (s: string) => s.replace(/[\r\n]+/g, ' ').slice(0, 180);
@@ -383,8 +395,9 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
     `).all(remindRoom) as any[];
     for (const r of reminders) {
       const dt = daysTag(r.deadline) || 'due';
-      const res = await sendEmail(db, { to, subject: subj(`[REMIND · ${dt}] ${r.title} (due ${r.deadline})`), body: body(r, false) });
-      if (res.success) { db.prepare("UPDATE ledger SET notified_at=datetime('now'), notified_tier='remind' WHERE id=?").run(r.id); sent++; }
+      const rsubject = subj(`[REMIND · ${dt}] ${r.title} (due ${r.deadline})`);
+      const res = await sendEmail(db, { to, subject: rsubject, body: body(r, false) });
+      if (res.success) { db.prepare("UPDATE ledger SET notified_at=datetime('now'), notified_tier='remind', notified_subject=? WHERE id=?").run(rsubject, r.id); sent++; }
     }
   }
 

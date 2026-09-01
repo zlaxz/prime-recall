@@ -108,9 +108,10 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
           const cov: string[] = buildCoverage(db);
           if (cov.length) { lines.push('', 'STAFF COVERAGE (who watched what):'); for (const c of cov) lines.push(`  ${c}`); }
           const props: any[] = getProposals(db, 3);
+          (buildBriefHeader as any).props = props;
           if (props.length) {
-            lines.push('', 'STAFF PROPOSALS (tell Quinn or Claude "yes to #n" / "no to #n"):');
-            props.forEach((pr: any, i: number) => lines.push(`  #${i + 1} ${pr.title} [${pr.monitor}]`));
+            lines.push('', 'STAFF PROPOSALS (reply to this email: "yes to #1", "no to #2", or just say what you want):');
+            props.forEach((pr: any, i: number) => lines.push(`  #${i + 1} [${String(pr.id).slice(0, 4)}] ${pr.title} [${pr.monitor}]`));
           }
         } catch {}
         const monitors = (db.prepare("SELECT COUNT(*) n FROM agent_state WHERE agent_type='pm' AND last_run_at >= datetime('now','-1 day')").get() as any)?.n ?? '?';
@@ -174,10 +175,14 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
         "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('cos_email_body', ?, datetime('now'))"
       ).run(focus);
       try {
-        const props = getProposals(db, 3);
-        if (result.threadId) db.prepare(
-          "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES (?, ?, datetime('now'))"
-        ).run(`brief_thread:${result.threadId}`, JSON.stringify({ sent_at: new Date().toISOString(), proposals: props.map((pr: any) => ({ id: pr.id, title: pr.title, monitor: pr.monitor })) }));
+        // keyed by SUBJECT (mailbox-safe; Gmail thread ids differ per mailbox) — the
+        // exact list and body Zach saw, so "#2" means the #2 in THIS email forever
+        const props: any[] = (buildBriefHeader as any).props || [];
+        db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+          .run(`brief_sent:${subject.replace(/^\[BRIEF\]\s*/, '').slice(0, 120)}`, JSON.stringify({
+            sent_at: new Date().toISOString(), body: bodyWithHeader.slice(0, 6000),
+            proposals: props.map((pr: any) => ({ id: pr.id, title: pr.title, monitor: pr.monitor })),
+          }));
       } catch {}
       console.log('[quinn-email] Sent: "' + subject.slice(0, 60) + '"');
       return true;

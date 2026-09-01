@@ -4,15 +4,32 @@
 import Database from 'better-sqlite3';
 import { getDb } from './db.js';
 import { getBallLists, buildCoverage, getProposals } from './ledger.js';
-import { writeFileSync, mkdirSync } from 'fs';
+import { writeFileSync, mkdirSync, renameSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-export function exportCommandCenter(db: Database.Database = getDb()): void {
+// SQLite 'YYYY-MM-DD HH:MM:SS' is UTC without a Z — parse it as such (audit: "ran -1d ago")
+const parseDb = (d: string) => new Date(/^\d{4}-\d{2}-\d{2} \d/.test(d) ? d.replace(' ', 'T') + 'Z' : d);
+// Deadlines are calendar dates: compare LOCAL calendar days, never UTC instants
+const daysUntil = (deadline: string): number | null => {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(deadline)) return null;
+  const dl = new Date(deadline.slice(0, 10) + 'T00:00:00');
+  const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (isNaN(dl.getTime())) return null;
+  return Math.round((dl.getTime() - today.getTime()) / 86400000);
+};
+// markdown-safe URL: encodeURIComponent leaves ( ) ' which break [text](url)
+const mdUrl = (u: string) => u.replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/'/g, '%27');
+
+// Returns the documents; writes files ONLY when write=true (the shift daemon).
+// Resource reads from the MCP server use the strings — two processes must not
+// race on the same files (audit H2), and writes are atomic (tmp + rename).
+export function exportCommandCenter(db: Database.Database = getDb(), opts: { write?: boolean } = {}): { today: string; ledger: string } {
+  const write = opts.write !== false;
   const dir = join(homedir(), '.prime', 'export');
-  mkdirSync(dir, { recursive: true });
+  if (write) mkdirSync(dir, { recursive: true });
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/Denver' });
-  const days = (d: string | null) => d ? Math.floor((Date.now() - new Date(d).getTime()) / 86400000) : '?';
+  const days = (d: string | null) => d ? Math.floor((Date.now() - parseDb(d).getTime()) / 86400000) : '?';
 
   const open = db.prepare(
     "SELECT * FROM ledger WHERE tier='act' AND status='open' ORDER BY notified_at IS NULL, deadline IS NULL, deadline"
@@ -26,7 +43,7 @@ export function exportCommandCenter(db: Database.Database = getDb()): void {
   const deliverables = db.prepare(
     "SELECT title, monitor, deliverable, updated_at FROM ledger WHERE deliverable IS NOT NULL ORDER BY updated_at DESC LIMIT 10"
   ).all() as any[];
-  const openDeliv = (d: string) => 'claude://cowork/new?q=' + encodeURIComponent('Review this Prime deliverable with me and suggest edits.') + '&file=' + encodeURIComponent('/Users/zstoc/Documents/Claude/Prime/' + d);
+  const openDeliv = (d: string) => mdUrl('claude://cowork/new?q=' + encodeURIComponent('Review this Prime deliverable with me and suggest edits.') + '&file=' + encodeURIComponent('/Users/zstoc/Documents/Claude/Prime/' + d));
   const stalling = db.prepare(
     "SELECT title, monitor FROM ledger WHERE status='open' AND bumped_at IS NOT NULL AND tier='brief' ORDER BY bumped_at DESC LIMIT 8"
   ).all() as any[];
@@ -41,11 +58,11 @@ export function exportCommandCenter(db: Database.Database = getDb()): void {
   // Desktop: one click opens Quinn (chat) or a Cowork session with this file
   // attached and the action pre-filled. Laptop path is the target.
   const TODAY_PATH = '/Users/zstoc/Documents/Claude/Prime/TODAY.md';
-  const quinnLink = (r: any) => 'claude://claude.ai/new?q=' + encodeURIComponent(
-    `You are Quinn (Prime relay). Help me with this action: "${r.title}". Next step on file: ${r.next_action || 'n/a'}. Use prime tools to pull the sources, then give me one recommendation.`);
-  const coworkLink = (r: any) => 'claude://cowork/new?q=' + encodeURIComponent(
+  const quinnLink = (r: any) => mdUrl('claude://claude.ai/new?q=' + encodeURIComponent(
+    `You are Quinn (Prime relay). Help me with this action: "${r.title}". Next step on file: ${r.next_action || 'n/a'}. Use prime tools to pull the sources, then give me one recommendation.`));
+  const coworkLink = (r: any) => mdUrl('claude://cowork/new?q=' + encodeURIComponent(
     `Work this Prime action end to end: "${r.title}". Next step: ${r.next_action || 'n/a'}. Read the attached TODAY.md for context. Do not send email to anyone — draft only.`)
-    + '&file=' + encodeURIComponent(TODAY_PATH);
+    + '&file=' + encodeURIComponent(TODAY_PATH));
 
   const today: string[] = [
     `# Prime — Today`, ``, `_Updated ${now} (regenerates hourly; source of truth is the Mini)_`, ``,
@@ -53,8 +70,8 @@ export function exportCommandCenter(db: Database.Database = getDb()): void {
     ...(open.length ? open.map(r => `- **${r.title}** [${r.monitor}]${r.deadline ? ` — due ${r.deadline}` : ''}${r.notified_at ? '' : ' _(queued)_'}${r.next_action ? `\n  - Next: ${r.next_action}` : ''}\n  - [Ask Quinn](${quinnLink(r)}) · [Work it in Cowork](${coworkLink(r)})`) : ['- none']),
     ``, `## Deadlines ahead`,
     ...(reminds.length ? reminds.map(r => {
-      const d = days(r.deadline);
-      const tag = d === '?' ? '?' : (d as number) > 0 ? `OVERDUE ${d}d` : `${-(d as number)}d`;
+      const d = daysUntil(r.deadline);
+      const tag = d === null ? '?' : d < 0 ? `OVERDUE ${-d}d` : d === 0 ? 'today' : `${d}d`;
       return `- ${r.deadline} (${tag}): ${r.title}`;
     }) : ['- none tracked']),
     ``, `## Cleared (last 48h)`,
@@ -66,7 +83,7 @@ export function exportCommandCenter(db: Database.Database = getDb()): void {
     ``, `## Staff coverage (who watched what)`,
     ...buildCoverage(db).map(c => `- ${c}`),
     ``, `## Staff proposals (say "yes to #n" to Quinn or Claude)`,
-    ...(() => { const ps = getProposals(db, 3); return ps.length ? ps.map((pr, i) => `- **#${i + 1} ${pr.title}** [${pr.monitor}]${pr.next_action ? ` — ${pr.next_action.slice(0, 160)}` : ''}`) : ['- none right now']; })(),
+    ...(() => { const ps = getProposals(db, 3); return ps.length ? ps.map((pr, i) => `- **#${i + 1} [${String(pr.id).slice(0, 4)}] ${pr.title}** [${pr.monitor}]${pr.next_action ? ` — ${pr.next_action.slice(0, 160)}` : ''}`) : ['- none right now']; })(),
     ``, `## You owe a response`,
     ...(youOwe.length ? youOwe.map(l => `- ${l}`) : ['- clear']),
     ``, `## Waiting on them`,
@@ -76,7 +93,8 @@ export function exportCommandCenter(db: Database.Database = getDb()): void {
     `- Mechanic runs last 24h: ${mech}`,
     ...(issues.length ? [`- Issues: ${issues.map(i => `${i.status}: ${i.o}`).join(' | ')}`] : ['- Issues: none open']),
   ];
-  writeFileSync(join(dir, 'TODAY.md'), today.join('\n'));
+  const todayText = today.join('\n');
+  if (write) { writeFileSync(join(dir, 'TODAY.md.tmp'), todayText); renameSync(join(dir, 'TODAY.md.tmp'), join(dir, 'TODAY.md')); }
 
   const all = db.prepare("SELECT * FROM ledger WHERE status='open' ORDER BY monitor, tier, deadline IS NULL, deadline").all() as any[];
   const ledger: string[] = [
@@ -85,5 +103,7 @@ export function exportCommandCenter(db: Database.Database = getDb()): void {
     `|---|---|---|---|---|---|---|`,
     ...all.map(r => `| ${r.monitor} | ${r.title} | ${r.tier} | ${r.ball || ''} | ${r.ball_since || ''} | ${r.deadline || ''} | ${(r.next_action || '').slice(0, 80)} |`),
   ];
-  writeFileSync(join(dir, 'LEDGER.md'), ledger.join('\n'));
+  const ledgerText = ledger.join('\n');
+  if (write) { writeFileSync(join(dir, 'LEDGER.md.tmp'), ledgerText); renameSync(join(dir, 'LEDGER.md.tmp'), join(dir, 'LEDGER.md')); }
+  return { today: todayText, ledger: ledgerText };
 }

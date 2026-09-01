@@ -14,7 +14,7 @@ import { insertKnowledge } from './db.js';
 
 const MAILBOX = 'zach.stock@recaptureinsurance.com';
 const SKIP_FILES = /\.(png|jpe?g|gif|ics|vcf|p7s|asc)$/i;
-const SKIP_SENDERS = /noreply|no-reply|donotreply|receipt|invoice\+|billing@|notification/i;
+const SKIP_SENDERS = /noreply|no-reply|donotreply|receipt@|billing@|newsletter|mailer-daemon/i;
 
 function gmailClient() {
   const auth = getServiceAccountAuth(MAILBOX, ['https://www.googleapis.com/auth/gmail.readonly']);
@@ -39,7 +39,12 @@ export async function indexAttachments(db: Database.Database, options: { days?: 
   const msgs = list.data.messages || [];
   let indexed = 0;
   const exists = db.prepare("SELECT 1 FROM knowledge WHERE source='attachment-index' AND source_ref = ?");
+  db.exec("CREATE TABLE IF NOT EXISTS attachment_scanned (message_id TEXT PRIMARY KEY, scanned_at TEXT DEFAULT (datetime('now')))");
+  const scanned = db.prepare("SELECT 1 FROM attachment_scanned WHERE message_id = ?");
+  const markScanned = db.prepare("INSERT OR IGNORE INTO attachment_scanned (message_id) VALUES (?)");
   for (const m of msgs) {
+    if (scanned.get(m.id)) continue;   // don't re-fetch full messages every tick
+    try {
     const msg = await gmail.users.messages.get({ userId: 'me', id: m.id!, format: 'full' });
     const headers = Object.fromEntries((msg.data.payload?.headers || []).map((h: any) => [h.name.toLowerCase(), h.value]));
     const from = String(headers['from'] || '');
@@ -48,7 +53,7 @@ export async function indexAttachments(db: Database.Database, options: { days?: 
     walkParts(msg.data.payload, atts);
     for (const a of atts) {
       if (SKIP_FILES.test(a.filename) || a.size < 2000) continue;
-      const ref = `attachment:${m.id}:${a.filename}`;
+      const ref = `attachment:${m.id}:${a.filename}:${String(a.attachmentId).slice(-8)}`;
       if (exists.get(ref)) continue;
       insertKnowledge(db, {
         id: uuid(),
@@ -56,7 +61,7 @@ export async function indexAttachments(db: Database.Database, options: { days?: 
         summary: `File "${a.filename}" (${a.mime}, ${Math.round(a.size / 1024)}KB) attached to "${headers['subject']}" from ${from.replace(/<[^>]*>/g, '').trim()}. Read contents on demand with prime_read_attachment message_id=${m.id} filename="${a.filename}".`,
         source: 'attachment-index',
         source_ref: ref,
-        source_date: headers['date'] ? new Date(String(headers['date'])).toISOString() : new Date().toISOString(),
+        source_date: (() => { const d = new Date(String(headers['date'] || '')); return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString(); })(),
         contacts: [from.replace(/<[^>]*>/g, '').trim()],
         metadata: {
           message_id: m.id, thread_id: msg.data.threadId, filename: a.filename,
@@ -64,6 +69,10 @@ export async function indexAttachments(db: Database.Database, options: { days?: 
         },
       } as any);
       indexed++;
+    }
+    markScanned.run(m.id);
+    } catch (e: any) {
+      console.log(`  attachment index: message ${m.id} skipped — ${(e?.message || '').slice(0, 80)}`);
     }
   }
   return { indexed, scanned: msgs.length };

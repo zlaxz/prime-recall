@@ -14,10 +14,15 @@ import { exportCommandCenter } from '../export-command-center.js';
 
 function fresh(file: 'TODAY.md' | 'LEDGER.md'): string {
   const db = getDb();
-  // regenerate so the resource is live, not last-hour
-  try { exportCommandCenter(db); } catch {}
-  try { return readFileSync(join(homedir(), '.prime', 'export', file), 'utf-8'); }
-  catch { return `(${file} not available yet — the shift daemon generates it hourly)`; }
+  // live, in-memory; only the shift daemon writes files (audit H2: two writers raced)
+  try {
+    const out = exportCommandCenter(db, { write: false });
+    return file === 'TODAY.md' ? out.today : out.ledger;
+  } catch (e: any) {
+    console.error('[mcp-surfaces] export failed: ' + (e?.message || e));
+    try { return readFileSync(join(homedir(), '.prime', 'export', file), 'utf-8') + '\n\n_(served from the last hourly file — live export failed)_'; }
+    catch { return `(${file} not available — export failed: ${(e?.message || '').slice(0, 120)})`; }
+  }
 }
 
 export function buildActivity(hours = 24): string {
@@ -88,5 +93,5 @@ export function registerPrimeSurfaces(srv: McpServer): void {
   // ── Tool: for surfaces that cannot attach resources (phone, ChatGPT) ──
   srv.tool('prime_activity', "What Prime's agents did recently — monitors run, ledger changes, emails sent to Zach, mechanic runs, system issues, ingestion counts. Use when Zach asks what Prime has been doing or whether it's working.",
     { hours: z.number().optional().describe('Look-back window in hours (default 24)') },
-    async ({ hours }) => ({ content: [{ type: 'text' as const, text: buildActivity(hours || 24) }] }));
+    async ({ hours }) => ({ content: [{ type: 'text' as const, text: buildActivity(Math.min(168, Math.max(1, Math.floor(hours || 24)))) }] }));
 }

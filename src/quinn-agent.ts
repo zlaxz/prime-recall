@@ -55,6 +55,12 @@ export async function runQuinnAgent(db: Database.Database): Promise<QuinnResult>
       GROUP BY source
     `).all(lastCycle) as any[];
     const newSummary = newItems.map((n: any) => `${n.source}: ${n.c} new`).join(', ') || 'nothing new';
+    // What Zach told the system since last cycle (email replies, notes, monitor requests)
+    let directives = '';
+    try {
+      const drows = db.prepare("SELECT title, summary FROM knowledge WHERE source='directive' AND created_at > ? ORDER BY created_at DESC LIMIT 10").all(lastCycle) as any[];
+      if (drows.length) directives = drows.map((d: any) => `- ${d.summary.slice(0, 300)}`).join('\n');
+    } catch {}
 
     // Weekly roster review: code computes the vitality evidence, Quinn makes
     // the stand-up/retire calls (announce-after). Gated to once per 7 days.
@@ -95,6 +101,7 @@ export async function runQuinnAgent(db: Database.Database): Promise<QuinnResult>
       newSummary,
       '',
       corrections.length > 0 ? `## CORRECTIONS (absolute truth)\n${corrections.map((c: any) => `- ${c.title}`).join('\n')}` : '',
+      directives ? `## ZACH SAID SINCE LAST CYCLE (email replies / notes — act on these first; a "monitor request" means evaluate prime_create_monitor per SOUL §10)\n${directives}` : '',
       '',
       rosterReviewDue ? `## WEEKLY ROSTER REVIEW (due now — act on it this cycle)\nYour monitor roster with vitality stats (cap 8):\n${rosterStats}\n\nDECIDE, per SOUL §10: (1) RETIRE any monitor whose situation concluded or has been dormant 3+ weeks (no open items, no movement) via prime_retire_monitor — announce one line in your brief. (2) STAND UP a monitor for any recurring situation in your briefs/ball-lists that nothing owns, via prime_create_monitor. (3) If nothing changes, say "roster reviewed — no changes" in your brief. This review recurs weekly.` : '',
       '',
@@ -200,7 +207,7 @@ export async function runQuinnAgent(db: Database.Database): Promise<QuinnResult>
     const ts = new Date().toISOString().slice(0, 13).replace(/[T:]/g, '-');
     writeFileSync(join(cycleDir, `quinn-${ts}.md`), `# Quinn Agent Cycle — ${dateStr}\n\n${response}`);
 
-    if (rosterReviewDue) {
+    if (rosterReviewDue && /```focus/.test(response)) {  // only a cycle that produced FOCUS counts
       db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_roster_review', ?, datetime('now'))")
         .run(JSON.stringify(new Date().toISOString()));
     }

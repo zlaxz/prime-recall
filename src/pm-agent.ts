@@ -173,6 +173,17 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     }
   } catch {}
 
+  // Existing keys (so updates match) and Zach's decisions (so they aren't re-pitched)
+  let keysBlock = '';
+  try {
+    const existing = db.prepare("SELECT item, tier, status, substr(title,1,70) t FROM ledger WHERE monitor=? AND (status='open' OR updated_at >= datetime('now','-30 days')) ORDER BY status, tier").all(config.agentId) as any[];
+    if (existing.length) {
+      keysBlock = '## YOUR LEDGER KEYS — reuse these exact item keys; never invent a new key for the same thing\n' +
+        existing.map((e: any) => `- ${e.item} [${e.tier}/${e.status}] ${e.t}`).join('\n') +
+        '\nItems marked dismissed or declined are Zach\'s decisions: do NOT re-emit them as open and do NOT re-propose them.';
+    }
+  } catch {}
+
   const prompt = [
     soul || `You are the PM for ${config.project}.`,
     '',
@@ -182,6 +193,7 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     concerns ? `## WHAT I'M WATCHING\n${concerns}\n` : '',
     lastWikiPage ? `## MY LAST WIKI PAGE\n${lastWikiPage.slice(0, 3000)}\n` : '',
     acceptedBlock,
+    keysBlock,
     '',
     'You have MCP tools. Use them to investigate what\'s new since your last cycle.',
     'Search for recent emails, check commitments, check the calendar.',
@@ -236,7 +248,7 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   // A missing middle marker must not let a slice swallow later blocks
   // (MEMORY.md was ingesting the raw LEDGER JSON when CONCERNS was absent).
   const nextMarkerAfter = (pos: number): number | undefined => {
-    const later = [memoryMarker, concernsMarker, ledgerMarkerPos].filter(m => m > pos);
+    const later = [memoryMarker, concernsMarker, ledgerMarkerPos, content.indexOf('---DELIVERABLE---')].filter(m => m > pos);
     return later.length ? Math.min(...later) : undefined;
   };
 
@@ -249,7 +261,8 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
 
   const ledgerMarker = ledgerMarkerPos;
   if (concernsMarker >= 0) {
-    concernsUpdate = content.slice(concernsMarker + '---CONCERNS_UPDATE---'.length, ledgerMarker > concernsMarker ? ledgerMarker : undefined).trim();
+    const cEnds = [ledgerMarker, content.indexOf('---DELIVERABLE---')].filter(m => m > concernsMarker);
+    concernsUpdate = content.slice(concernsMarker + '---CONCERNS_UPDATE---'.length, cEnds.length ? Math.min(...cEnds) : undefined).trim();
   }
 
   // Parse + store ledger rows (structured ball-tracking behind the wiki)
@@ -285,9 +298,10 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
         const itemKey = itemLine.replace(/^item:\s*/i, '').trim();
         let fname = fileLine.replace(/^filename:\s*/i, '').trim().replace(/[^\w.-]/g, '_') || `deliverable-${Date.now()}.md`;
         if (!/\.md$/i.test(fname)) fname += '.md';
-        const bodyStart = lines.findIndex((l, i) => i > 0 && !/^(item|filename):/i.test(l) && l.trim() !== '');
+        const bodyStart = lines.findIndex(l => !/^(item|filename):/i.test(l) && l.trim() !== '');
         const doc = lines.slice(Math.max(bodyStart, 0)).join('\n').trim();
-        if (doc.length < 200) continue;
+        if (doc.length < 200) { console.log(`    PM ${config.agentId}: deliverable "${fname}" too short (${doc.length} chars) — not saved`); continue; }
+        if (itemKey) fname = `${itemKey.replace(/[^\w.-]/g, '_').slice(0, 40)}--${fname}`;  // no cross-item overwrites
         const fp = join(outDir, fname);
         writeFileSync(fp, `<!-- ${config.agentId} · ${dateStr} · fulfills: ${itemKey || 'n/a'} -->\n\n${doc}`, 'utf-8');
         if (itemKey) db.prepare("UPDATE ledger SET deliverable=? WHERE monitor=? AND item=?").run(`deliverables/${config.agentId}/${fname}`, config.agentId, itemKey);

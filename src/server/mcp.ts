@@ -623,7 +623,7 @@ srv.tool(
 
 srv.tool(
   "prime_read_attachment",
-  "Read the CONTENTS of an email attachment on demand (PDF/doc/docx/rtf/txt/csv). Attachment index cards appear in search results as source 'attachment-index' with a message_id and filename in their summary/metadata. Use this when a task needs what a document actually SAYS — a policy dec page, a signed agreement, loss runs, a filing. Bytes are fetched live from Gmail and extracted; nothing is stored. Scanned PDFs without a text layer return a clear note instead of text.",
+  "Read the CONTENTS of an email attachment on demand — PDF, doc/docx, rtf, txt, csv (NOT xlsx yet; say so if asked). Attachment index cards appear in search results as source 'attachment-index' with a message_id and filename in their summary/metadata. Use this when a task needs what a document actually SAYS — a policy dec page, a signed agreement, loss runs, a filing. Bytes are fetched live from Gmail and extracted; nothing is stored. Scanned PDFs without a text layer return a clear note instead of text.",
   {
     message_id: z.string().describe("Gmail message id from the attachment-index card"),
     filename: z.string().describe("Attachment filename (exact or partial match)"),
@@ -652,9 +652,9 @@ srv.tool(
     const row = db.prepare("SELECT agent_id, project, active FROM pm_agents WHERE agent_id = ?").get(agent_id) as any;
     if (!row) return { content: [{ type: "text" as const, text: `No monitor '${agent_id}' on the roster.` }] };
     if (!row.active) return { content: [{ type: "text" as const, text: `'${agent_id}' is already retired.` }] };
-    const openItems = (db.prepare("SELECT COUNT(*) n FROM ledger WHERE monitor = ? AND status = 'open' AND tier IN ('act','remind')").get(agent_id) as any).n;
+    const openItems = (db.prepare("SELECT COUNT(*) n FROM ledger WHERE monitor = ? AND ((status = 'open' AND tier IN ('act','remind')) OR (tier='propose' AND status='accepted'))").get(agent_id) as any).n;
     if (openItems > 0) {
-      return { content: [{ type: "text" as const, text: `Not retired: '${agent_id}' still has ${openItems} open act/remind ledger item(s). Resolve or dismiss them first, or retire anyway by dismissing them yourself — a monitor with live obligations should not silently vanish.` }] };
+      return { content: [{ type: "text" as const, text: `Not retired: '${agent_id}' still has ${openItems} open act/remind ledger item(s). Ask Zach to reply 'done' or 'skip' to those action emails (or say so in chat) so they close, then retire — a monitor with live obligations should not silently vanish.` }] };
     }
     db.prepare("UPDATE pm_agents SET active = 0 WHERE agent_id = ?").run(agent_id);
     db.prepare("INSERT INTO knowledge (id, title, summary, source, source_ref, source_date, created_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))")
@@ -678,8 +678,9 @@ srv.tool(
     const n = parseInt(String(which).replace('#', ''), 10);
     let pick = (!isNaN(n) && n >= 1 && n <= open.length) ? open[n - 1] : null;
     if (!pick) {
-      const w = String(which).toLowerCase();
-      pick = open.find((p: any) => String(p.title).toLowerCase().includes(w)) || null;
+      const w = String(which).toLowerCase().replace(/[\[\]#]/g, '').trim();
+      pick = open.find((p: any) => String(p.id).toLowerCase().startsWith(w) && w.length >= 4)
+        || open.find((p: any) => String(p.title).toLowerCase().includes(w)) || null;
     }
     if (!pick) return { content: [{ type: "text" as const, text: `Couldn't match "${which}". Open proposals: ${open.map((p: any, i: number) => `#${i + 1} ${p.title}`).join(' | ')}` }] };
     const status = decline ? 'dismissed' : 'accepted';
