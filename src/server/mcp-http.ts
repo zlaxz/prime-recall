@@ -17,7 +17,33 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 // Track active transports by session ID
 const transports = new Map<string, StreamableHTTPServerTransport>();
 
+// Desktop/claude.ai reconnects without ever sending DELETE, so transports
+// accumulate forever without this — each holds a live McpServer. Sweep any
+// session with no request activity for SESSION_IDLE_TIMEOUT_MS.
+const lastActivity = new Map<string, number>();
+const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+function touchSession(sessionId: string) {
+  lastActivity.set(sessionId, Date.now());
+}
+
+function sweepIdleSessions() {
+  const now = Date.now();
+  for (const [sid, ts] of lastActivity) {
+    if (now - ts <= SESSION_IDLE_TIMEOUT_MS) continue;
+    const transport = transports.get(sid);
+    if (transport) {
+      transport.close().catch(() => {});
+    }
+    transports.delete(sid);
+    lastActivity.delete(sid);
+  }
+}
+
 export function mountMcpHttp(app: Express) {
+  setInterval(sweepIdleSessions, SESSION_SWEEP_INTERVAL_MS);
+
   // Handle MCP requests (POST for messages, GET for SSE stream, DELETE for cleanup)
   app.all('/mcp', async (req: Request, res: Response) => {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
@@ -26,6 +52,7 @@ export function mountMcpHttp(app: Express) {
       // Check for existing session
       if (sessionId && transports.has(sessionId)) {
         const transport = transports.get(sessionId)!;
+        touchSession(sessionId);
         // express.json() already consumed the stream — must pass the parsed body
         await transport.handleRequest(req, res, req.body);
         return;
@@ -37,7 +64,7 @@ export function mountMcpHttp(app: Express) {
         // Session id is assigned DURING handleRequest(initialize) — storing the
         // transport before that ran left the map empty and every follow-up
         // request hit a fresh uninitialized transport.
-        onsessioninitialized: (sid: string) => { transports.set(sid, transport); },
+        onsessioninitialized: (sid: string) => { transports.set(sid, transport); touchSession(sid); },
       });
 
       const server = new McpServer(MCP_SERVER_CONFIG);
@@ -45,7 +72,7 @@ export function mountMcpHttp(app: Express) {
 
       transport.onclose = () => {
         const sid = [...transports.entries()].find(([, t]) => t === transport)?.[0];
-        if (sid) transports.delete(sid);
+        if (sid) { transports.delete(sid); lastActivity.delete(sid); }
       };
 
       await server.connect(transport);
@@ -59,6 +86,7 @@ export function mountMcpHttp(app: Express) {
         return;
       }
       const transport = transports.get(sessionId)!;
+      touchSession(sessionId);
       await transport.handleRequest(req, res);
 
     } else if (req.method === 'DELETE') {
@@ -67,6 +95,7 @@ export function mountMcpHttp(app: Express) {
         const transport = transports.get(sessionId)!;
         await transport.handleRequest(req, res);
         transports.delete(sessionId);
+        lastActivity.delete(sessionId);
       } else {
         res.status(200).end();
       }
