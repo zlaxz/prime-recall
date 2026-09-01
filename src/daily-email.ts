@@ -87,11 +87,11 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
       const lines: string[] = [];
       try {
         const cleared = db.prepare(
-          "SELECT title, monitor FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-1 day')"
+          "SELECT title, monitor, deliverable FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-1 day')"
         ).all() as any[];
         if (cleared.length) {
           lines.push('CLEARED since yesterday:');
-          for (const c of cleared.slice(0, 5)) lines.push(`  DONE ${c.title} [${c.monitor}]`);
+          for (const c of cleared.slice(0, 5)) lines.push(`  DONE ${c.title} [${c.monitor}]${c.deliverable ? ` — file: ~/Documents/Claude/Prime/${c.deliverable}` : ''}`);
         }
         const openActs = db.prepare(
           "SELECT COUNT(*) n FROM ledger WHERE tier='act' AND status='open' AND notified_at IS NOT NULL"

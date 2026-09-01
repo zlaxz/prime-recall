@@ -61,6 +61,7 @@ export function ensureLedger(db: Database.Database): void {
   try { db.exec("ALTER TABLE ledger ADD COLUMN notified_tier TEXT"); } catch {}
   try { db.exec("ALTER TABLE ledger ADD COLUMN notified_subject TEXT"); } catch {}
   try { db.exec("ALTER TABLE ledger ADD COLUMN resolved_at TEXT"); } catch {}
+  try { db.exec("ALTER TABLE ledger ADD COLUMN deliverable TEXT"); } catch {}
 }
 
 // LLM output → clean scalar. Headers and single-line fields must never
@@ -131,6 +132,8 @@ export function upsertLedgerRows(db: Database.Database, monitor: string, rows: L
           .map((l: any) => ({ label: oneLine(l.label, 80) || 'link', url: l.url.trim().replace(/[\r\n\s]+/g, '') }));
         if (clean.length) linksJson = JSON.stringify(clean);
       }
+      // evidence gate: an [ACT] email never reaches Zach without a source link
+      if (tier === 'act' && !linksJson) tier = deadline ? 'remind' : 'brief';
       return {
         id: uuid(), monitor, item: oneLine(r.item, 120)!, title: oneLine(r.title, 200)!,
         counterparty: oneLine(r.counterparty), state: oneLine(r.state, 300), ball: ball || null,
@@ -203,6 +206,21 @@ export function getBallLists(db: Database.Database, windowDays = 45, cap = 10): 
   return { youOwe, waitingOn };
 }
 
+// Learning loop (demote-only, deliberately): if Zach dismissed a monitor's last
+// two act-tier items and resolved none in 30 days, that monitor's actions stop
+// emailing him for 14 days — they stay in the brief. Promotion is left to the
+// weekly roster review; asymmetric risk favors quieter, not louder.
+export function mutedMonitors(db: Database.Database): string[] {
+  ensureLedger(db);
+  const rows = db.prepare(`
+    SELECT monitor,
+      SUM(CASE WHEN status='dismissed' THEN 1 ELSE 0 END) dismissed,
+      SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) resolved
+    FROM ledger WHERE notified_tier='act' AND updated_at >= datetime('now','-30 days')
+    GROUP BY monitor`).all() as any[];
+  return rows.filter(r => r.dismissed >= 2 && r.resolved === 0).map(r => r.monitor);
+}
+
 // Proof of attention: one line per active monitor — when it ran, what's open,
 // what it's watching, when its slice last moved. Deterministic from the DB.
 export function buildCoverage(db: Database.Database): string[] {
@@ -223,7 +241,8 @@ export function buildCoverage(db: Database.Database): string[] {
       "SELECT title, deadline, ball_since FROM ledger WHERE monitor=? AND status='open' AND tier IN ('act','remind') ORDER BY deadline IS NULL, deadline, ball_since LIMIT 1"
     ).get(m.agent_id) as any;
     const watching = top ? ` · watching: ${String(top.title).slice(0, 60)}` : ' · nothing urgent';
-    return `${m.project} — ran ${rel(m.last_run_at)} · ${st.n} open · last movement ${rel(st.mx)}${watching}`;
+    const muted = mutedMonitors(db).includes(m.agent_id) ? ' · MUTED (you skipped its last actions — brief only)' : '';
+    return `${m.project} — ran ${rel(m.last_run_at)} · ${st.n} open · last movement ${rel(st.mx)}${watching}${muted}`;
   });
 }
 
@@ -316,10 +335,11 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
   // New [ACT] notifications, under both caps, most urgent first.
   const room = Math.max(0, Math.min(MAX_OPEN_ACT - openNotified, MAX_NEW_ACT_PER_DAY - todayAct));
   if (room > 0) {
-    const candidates = db.prepare(`
+    const muted = mutedMonitors(db);
+    const candidates = (db.prepare(`
       SELECT * FROM ledger WHERE tier='act' AND status='open' AND notified_at IS NULL
-      ORDER BY deadline IS NULL, deadline, ball_since LIMIT ?
-    `).all(room) as any[];
+      ORDER BY deadline IS NULL, deadline, ball_since LIMIT 20
+    `).all() as any[]).filter(r => !muted.includes(r.monitor)).slice(0, room);
     let slot = openNotified;
     for (const r of candidates) {
       slot++;

@@ -212,7 +212,11 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     'ATTACHMENTS: search results with source attachment-index are document CARDS (dec pages, signed agreements, loss runs, filings). When a task turns on what a document actually says, call prime_read_attachment with the card\'s message_id and filename to read it live. Cite documents you read as [VERIFIED: attachment:message_id:filename].',
     'PROPOSALS RULE: you may include at most ONE ledger item per cycle with "tier":"propose" — an OFFER of something you COULD do for Zach beyond your current instructions: a document (claim chronology, renewal package, comparison sheet), a research task, a new watch item, a draft he did not ask for. Title it as an offer ("I could build…"), put the concrete plan in next_action, ball "agent", no deadline. Never propose sending anything to a third party. Do not re-propose something already declined.',
     'RESOURCES RULE: every act/remind item should include "links": [{"label":"...","url":"..."}] — up to 4. Convert the thread ids you cite into Gmail deep links: https://mail.google.com/mail/u/0/#all/THREAD_ID (drop the "thread:" prefix). CRITICALLY: hunt for the artifact that would COMPLETE the task (the policy document, the filing portal, the attachment) — link the email that carries it, a Drive URL if one appears in the record, or the official portal URL if one is cited in the sources. If the completing artifact does NOT exist in the record after searching, say so explicitly in next_action ("searched: no renewed dec page exists in email history") — a verified absence is decisive information.',
+    'EVIDENCE GATE: an act-tier item MUST carry at least one link (Gmail deep link to the source thread, portal, or Drive) or it will be downgraded automatically — Zach never gets an action email without evidence.',
     'CLOSURE BY OBSERVATION: before emitting an item, search Zach\'s sent mail (source gmail-sent) — if he already took the recommended action, set status "resolved". Keep item keys stable so updates match.)',
+    '',
+    '---DELIVERABLE---',
+    '(OPTIONAL, repeatable. When you complete an ACCEPTED PROPOSAL or produce any finished document — a claim chronology, tender packet, renewal package, comparison — emit it here so it lands in Zach\'s hands as a file, not buried in your wiki. First line: item: <the ledger item key it fulfills>. Second line: filename: <short-slug>.md. Then the full markdown document. Keep the fulfilled ledger item in your LEDGER block with status "resolved".)',
   ].filter(Boolean).join('\n');
 
   // Call Opus via proxy — fresh session each cycle
@@ -251,7 +255,8 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   // Parse + store ledger rows (structured ball-tracking behind the wiki)
   if (ledgerMarker >= 0) {
     try {
-      let raw = content.slice(ledgerMarker + '---LEDGER---'.length).trim();
+      const delivMarker = content.indexOf('---DELIVERABLE---');
+      let raw = content.slice(ledgerMarker + '---LEDGER---'.length, delivMarker > ledgerMarker ? delivMarker : undefined).trim();
       raw = raw.replace(/^```(json)?/m, '').replace(/```\s*$/m, '').trim();
       const start = raw.indexOf('['); const end = raw.lastIndexOf(']');
       if (start >= 0 && end > start) {
@@ -263,6 +268,34 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     } catch (e: any) {
       console.log(`    PM ${config.agentId}: ledger parse failed — ${(e.message || '').slice(0, 80)}`);
     }
+  }
+
+  // Deliverables → files Zach can open (synced to ~/Documents/Claude/Prime/deliverables/)
+  try {
+    const blocks = content.split('---DELIVERABLE---').slice(1);
+    if (blocks.length) {
+      const outDir = join(homedir(), '.prime', 'export', 'deliverables', config.agentId);
+      mkdirSync(outDir, { recursive: true });
+      const { ensureLedger } = await import('./ledger.js');
+      ensureLedger(db);
+      for (const b of blocks) {
+        const lines = b.trim().split('\n');
+        const itemLine = lines.find(l => /^item:/i.test(l)) || '';
+        const fileLine = lines.find(l => /^filename:/i.test(l)) || '';
+        const itemKey = itemLine.replace(/^item:\s*/i, '').trim();
+        let fname = fileLine.replace(/^filename:\s*/i, '').trim().replace(/[^\w.-]/g, '_') || `deliverable-${Date.now()}.md`;
+        if (!/\.md$/i.test(fname)) fname += '.md';
+        const bodyStart = lines.findIndex((l, i) => i > 0 && !/^(item|filename):/i.test(l) && l.trim() !== '');
+        const doc = lines.slice(Math.max(bodyStart, 0)).join('\n').trim();
+        if (doc.length < 200) continue;
+        const fp = join(outDir, fname);
+        writeFileSync(fp, `<!-- ${config.agentId} · ${dateStr} · fulfills: ${itemKey || 'n/a'} -->\n\n${doc}`, 'utf-8');
+        if (itemKey) db.prepare("UPDATE ledger SET deliverable=? WHERE monitor=? AND item=?").run(`deliverables/${config.agentId}/${fname}`, config.agentId, itemKey);
+        console.log(`    PM ${config.agentId}: deliverable saved — ${fname}`);
+      }
+    }
+  } catch (e: any) {
+    console.log(`    PM ${config.agentId}: deliverable parse failed — ${(e.message || '').slice(0, 80)}`);
   }
 
   // Save wiki page — only when markers parsed and content is substantive.

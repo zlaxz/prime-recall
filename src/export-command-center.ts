@@ -21,8 +21,12 @@ export function exportCommandCenter(db: Database.Database = getDb()): void {
     "SELECT * FROM ledger WHERE tier='remind' AND status='open' AND deadline IS NOT NULL ORDER BY date(deadline) LIMIT 10"
   ).all() as any[];
   const cleared = db.prepare(
-    "SELECT title, monitor FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-2 day')"
+    "SELECT title, monitor, deliverable FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-2 day')"
   ).all() as any[];
+  const deliverables = db.prepare(
+    "SELECT title, monitor, deliverable, updated_at FROM ledger WHERE deliverable IS NOT NULL ORDER BY updated_at DESC LIMIT 10"
+  ).all() as any[];
+  const openDeliv = (d: string) => 'claude://cowork/new?q=' + encodeURIComponent('Review this Prime deliverable with me and suggest edits.') + '&file=' + encodeURIComponent('/Users/zstoc/Documents/Claude/Prime/' + d);
   const stalling = db.prepare(
     "SELECT title, monitor FROM ledger WHERE status='open' AND bumped_at IS NOT NULL AND tier='brief' ORDER BY bumped_at DESC LIMIT 8"
   ).all() as any[];
@@ -54,7 +58,9 @@ export function exportCommandCenter(db: Database.Database = getDb()): void {
       return `- ${r.deadline} (${tag}): ${r.title}`;
     }) : ['- none tracked']),
     ``, `## Cleared (last 48h)`,
-    ...(cleared.length ? cleared.map(c => `- ✅ ${c.title} [${c.monitor}]`) : ['- nothing yet']),
+    ...(cleared.length ? cleared.map(c => `- ✅ ${c.title} [${c.monitor}]${c.deliverable ? ` — [open](${openDeliv(c.deliverable)}) · ${c.deliverable}` : ''}`) : ['- nothing yet']),
+    ``, `## Deliverables (what the staff produced)`,
+    ...(deliverables.length ? deliverables.map(d => `- ${d.title} [${d.monitor}] — [open in Cowork](${openDeliv(d.deliverable)}) · \`${d.deliverable}\``) : ['- none yet']),
     ``, `## Stalling (emailed + bumped, no movement)`,
     ...(stalling.length ? stalling.map(s => `- ⚠️ ${s.title} [${s.monitor}]`) : ['- none']),
     ``, `## Staff coverage (who watched what)`,
