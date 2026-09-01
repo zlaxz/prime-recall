@@ -8,7 +8,11 @@
 # path is a symlink to it. One copy, one sync, one place.
 
 MACMINI="macmini"
-PRIME_DIR="/Users/zstoc/Documents/Claude/Prime"
+# Real directory lives OUTSIDE ~/Documents: launchd-spawned rsync is denied by
+# macOS TCC inside Documents ("Operation not permitted", audit 2026-08-31).
+# ~/Documents/Claude/Prime and ~/ObsidianVault/Projects/prime are symlinks here,
+# so Cowork/Obsidian/deep links keep their Documents paths.
+PRIME_DIR="/Users/zstoc/PrimeMirror"
 
 mkdir -p "${PRIME_DIR}/wiki" "${PRIME_DIR}/cycles"
 
