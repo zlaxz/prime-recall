@@ -3,6 +3,7 @@ import { readFileSync , readdirSync } from 'fs';
 import { join } from 'path';
 import { sendEmail } from './connectors/gmail.js';
 import { buildCoverage, getProposals } from './ledger.js';
+import { heldToday } from './email-budget.js';
 
 // ============================================================
 // Quinn's Daily Email — sends FOCUS.md as an email to Zach
@@ -123,7 +124,9 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
           const n = readdirSync(join(homedir, '.prime', 'health-alerts')).filter((f: string) => !f.endsWith('.dispatched')).length;
           brokenTxt = n === 0 ? 'nothing broken' : `${n} issue(s) flagged`;
         } catch {}
-        lines.push(`SYSTEM: ${monitors} monitors ran · ${mech.n} mechanic run${mech.n === 1 ? '' : 's'} · ${brokenTxt}`);
+        let heldTxt = '';
+        try { const h = heldToday(db); if (h.n) heldTxt = ` · ${h.n} email${h.n === 1 ? '' : 's'} held back by the daily cap`; } catch {}
+        lines.push(`SYSTEM: ${monitors} monitors ran · ${mech.n} mechanic run${mech.n === 1 ? '' : 's'} · ${brokenTxt}${heldTxt}`);
       } catch {}
       return lines.join('\n');
     };

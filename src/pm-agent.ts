@@ -203,7 +203,7 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     '- VERIFY OWNERSHIP: Before saying "Person X owns task Y," search for emails between X and the relevant party. Check WHO is actually in the email thread. If Zach has been emailing someone directly, that is Zach\'s relationship — do not attribute it to a team member just because they were mentioned nearby.',
     '- CITE OR DELETE: Every factual claim must trace to a specific email you retrieved via prime_retrieve. If you only read a summary or search result, you do NOT have evidence. Either retrieve the source or delete the claim.',
     '- SEPARATE VERIFIED FROM ASSUMED: In your wiki page, mark claims as [VERIFIED: thread:ID] or [UNVERIFIED: inference from summary]. Do not present inferences as facts.',
-    '- NO SEND AUTHORITY: You must NEVER call prime_send_email, prime_approve_action, prime_schedule_meeting, or any tool that contacts a third party. Outbound text goes ONLY into the ledger draft field — Zach sends it himself.',
+    '- NO SEND AUTHORITY: You must NEVER call prime_send_email, prime_notify, prime_approve_action, prime_schedule_meeting, or any tool that emails Zach or contacts a third party. Outbound text goes ONLY into the ledger draft field — Zach sends it himself.',
     '- ACT BUDGET: at most 2 act-tier ledger items per cycle. If more qualify, keep the two most costly to delay and tier the rest remind or brief.',
     '- CHECK YOUR PRIOR ASSUMPTIONS: Your memory from last cycle may be wrong. If you wrote "Forrest is handling X" last cycle, verify it this cycle by checking who is actually emailing about X.',
     '',

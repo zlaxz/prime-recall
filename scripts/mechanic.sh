@@ -131,9 +131,30 @@ body = {
 json.dump(body, open(sys.argv[2], "w"))
 PY
 
+# ── pre-flight: a dead proxy is the WATCHDOG's problem, not a mechanic run ──
+if ! curl -s --max-time 5 http://127.0.0.1:3211/health | grep -q ok; then
+  log "proxy not answering — run skipped (no attempt consumed, no email)"
+  [ -n "$ISSUE_ID" ] && sqlite3 "$DB" "UPDATE system_issues SET status='open', attempts=COALESCE(attempts,1)-1, updated_at=datetime('now') WHERE id='$ISSUE_ID'" 2>/dev/null
+  rm -f "$STAMP"; rm -rf "$WORK"; exit 0
+fi
+
 # ── run the agent (response to file — env passing corrupted large payloads) ──
 curl -s --max-time $((AGENT_TIMEOUT + 60)) -X POST "$PROXY" \
-  -H "Content-Type: application/json" -d @"$WORK/body.json" -o "$WORK/resp.json"
+  -H "Content-Type: application/json" -d @"$WORK/body.json" -o "$WORK/resp.json" 2>"$WORK/curl.err"
+CURL_RC=$?
+if [ "$CURL_RC" -ne 0 ] || [ ! -s "$WORK/resp.json" ]; then
+  # transport failure (curl rc, empty body) — not a diagnosis; retry once, then stand down quietly
+  log "transport failure (curl rc=$CURL_RC: $(head -c 120 "$WORK/curl.err" 2>/dev/null)) — retrying once in 30s"
+  sleep 30
+  curl -s --max-time $((AGENT_TIMEOUT + 60)) -X POST "$PROXY" \
+    -H "Content-Type: application/json" -d @"$WORK/body.json" -o "$WORK/resp.json" 2>"$WORK/curl.err"
+  CURL_RC=$?
+  if [ "$CURL_RC" -ne 0 ] || [ ! -s "$WORK/resp.json" ]; then
+    log "transport failure again (rc=$CURL_RC) — giving up quietly; attempt not consumed"
+    [ -n "$ISSUE_ID" ] && sqlite3 "$DB" "UPDATE system_issues SET status='open', attempts=COALESCE(attempts,1)-1, updated_at=datetime('now') WHERE id='$ISSUE_ID'" 2>/dev/null
+    rm -rf "$WORK"; exit 0
+  fi
+fi
 
 python3 - "$WORK" <<'PY' > "$WORK/parsed.txt"
 import json, sys, os
@@ -220,7 +241,12 @@ for short in [x.strip().lower() for x in m.group(1).split(",")]:
 con.commit()
 PY
 
-# ── file anything the agent "also noticed" as new issues ──
+# ── file anything the agent "also noticed" as new issues — narrowly ──
+# Only from FIXED runs (a failed run's "noticed" list is mostly its own
+# confusion), never lines that reference another issue id (that was a
+# self-feeding meta-loop: issues about issues, 2026-09-01), never when the
+# queue already has 5+ open — the queue is for defects, not commentary.
+if [ "$STATUS" = "FIXED" ]; then
 python3 - "$DB" "$WORK/report.md" <<'PY'
 import sqlite3, sys, uuid, re
 db, path = sys.argv[1:3]
@@ -230,20 +256,26 @@ if not m: sys.exit(0)
 text = m.group(1).strip()
 if not text or text.lower().startswith("nothing"): sys.exit(0)
 con = sqlite3.connect(db)
-for line in [l.strip("-* ").strip() for l in text.splitlines() if l.strip("-* ").strip()][:3]:
+open_n = con.execute("SELECT COUNT(*) FROM system_issues WHERE status IN ('open','dispatched')").fetchone()[0]
+if open_n >= 5: sys.exit(0)
+filed = 0
+for line in [l.strip("-* ").strip() for l in text.splitlines() if l.strip("-* ").strip()][:2]:
     line = re.sub(r"\s+", " ", line)
-    dup = con.execute("SELECT 1 FROM system_issues WHERE status IN ('open','dispatched') AND substr(observation,1,80)=substr(?,1,80)", (line,)).fetchone()
-    if not dup:
-        con.execute("INSERT INTO system_issues (id, reported_by, observation, why_wrong) VALUES (?,?,?,?)",
-                    (str(uuid.uuid4()), "mechanic", line, "noticed during a repair run"))
+    if re.search(r"\b[0-9a-f]{8}\b", line) or re.search(r"\bissue\b", line, re.I): continue
+    if len(line) < 40: continue
+    dup = con.execute("SELECT 1 FROM system_issues WHERE created_at >= datetime('now','-7 days') AND substr(observation,1,60)=substr(?,1,60)", (line,)).fetchone()
+    if dup: continue
+    con.execute("INSERT INTO system_issues (id, reported_by, observation, why_wrong) VALUES (?,?,?,?)",
+                (str(uuid.uuid4()), "mechanic", line, "noticed during a repair run")); filed += 1
 con.commit()
 PY
+fi
 
 # ── deliver to Zach ─────────────────────────────────────
 # FIXED runs fold into the morning brief's SYSTEM line (report + knowledge
 # row still saved) — only exceptions that need Zach earn an interrupt.
-if [ "$STATUS" = "FIXED" ]; then
-  log "FIXED — no email (brief carries it)"
+if [ "$STATUS" = "FIXED" ] || [ "$STATUS" = "NO_ISSUE" ] || grep -q "Mechanic run did not complete" "$WORK/report.md"; then
+  log "$STATUS — no email (brief carries it)"
   rm -rf "$WORK"
   exit 0
 fi

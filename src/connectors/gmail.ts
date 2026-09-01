@@ -820,6 +820,19 @@ export async function sendEmail(
   options = { ...options, to: cleanHeader(options.to), subject: cleanHeader(options.subject),
     cc: options.cc ? cleanHeader(options.cc) : undefined, bcc: options.bcc ? cleanHeader(options.bcc) : undefined };
   const fromEmail = options.from || 'quinn@recaptureinsurance.com';
+  // Email budget: one choke point for everything Prime sends Zach (2026-09-01,
+  // "too many emails"). Held messages are logged; the brief reports the count.
+  const zachOnly = /zach\.stock@recaptureinsurance/i.test(options.to) && !/,/.test(options.to);
+  if (zachOnly) {
+    try {
+      const { emailBudgetAllows } = await import('../email-budget.js');
+      const verdict = emailBudgetAllows(db, options.subject, options.inReplyTo);
+      if (!verdict.allowed) {
+        console.log(`[email-budget] HELD (${verdict.reason}): ${options.subject.slice(0, 80)}`);
+        return { success: false, error: `held by email budget: ${verdict.reason}` };
+      }
+    } catch (e: any) { console.log('[email-budget] check failed, sending: ' + (e?.message || e)); }
+  }
   const saAuth = getServiceAccountAuth(fromEmail, ['https://www.googleapis.com/auth/gmail.send']);
   if (!saAuth) {
     return { success: false, error: 'Service account not configured for gmail.send' };

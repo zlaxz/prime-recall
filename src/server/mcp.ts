@@ -704,6 +704,13 @@ srv.tool(
   },
   async ({ title, body, urgency, agent, project, action_required }) => {
     const db = getDb();
+    // Monitors have no send authority: their notices ride in the brief, never the inbox
+    if (agent && /-pm$/i.test(agent)) {
+      const { randomUUID: ru } = await import('crypto');
+      db.prepare("INSERT INTO knowledge (id, title, summary, source, source_ref, source_date, created_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))")
+        .run(ru(), `[${agent}] ${title}`.slice(0, 200), `${body}${action_required ? `\nAction: ${action_required}` : ''}`.slice(0, 2000), 'agent-report', `notify:${agent}:${Date.now()}`);
+      return { content: [{ type: "text" as const, text: `Logged for the morning brief (monitors do not email Zach directly). If it needs action, put it in your LEDGER block as an act/remind item with a draft.` }] };
+    }
     const { notify } = await import('../notify.js');
     const result = await notify(db, {
       title, body, urgency: urgency as any,

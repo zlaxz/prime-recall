@@ -390,7 +390,7 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
   if (remindRoom > 0) {
     const reminders = db.prepare(`
       SELECT * FROM ledger WHERE tier='remind' AND status='open' AND notified_at IS NULL
-        AND deadline IS NOT NULL AND date(deadline) <= date('now','+5 days')
+        AND deadline IS NOT NULL AND date(deadline) <= date('now','localtime','+2 days')
       ORDER BY date(deadline) LIMIT ?
     `).all(remindRoom) as any[];
     for (const r of reminders) {
