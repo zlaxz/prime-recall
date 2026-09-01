@@ -47,7 +47,11 @@ export function exportCommandCenter(db = getDb()): void {
     `## Open actions (each has an [ACT] email)`,
     ...(open.length ? open.map(r => `- **${r.title}** [${r.monitor}]${r.deadline ? ` — due ${r.deadline}` : ''}${r.notified_at ? '' : ' _(queued)_'}${r.next_action ? `\n  - Next: ${r.next_action}` : ''}\n  - [Ask Quinn](${quinnLink(r)}) · [Work it in Cowork](${coworkLink(r)})`) : ['- none']),
     ``, `## Deadlines ahead`,
-    ...(reminds.length ? reminds.map(r => `- ${r.deadline} (${days(r.deadline) === '?' ? '?' : -1 * (days(r.deadline) as number)}d): ${r.title}`) : ['- none tracked']),
+    ...(reminds.length ? reminds.map(r => {
+      const d = days(r.deadline);
+      const tag = d === '?' ? '?' : (d as number) > 0 ? `OVERDUE ${d}d` : `${-(d as number)}d`;
+      return `- ${r.deadline} (${tag}): ${r.title}`;
+    }) : ['- none tracked']),
     ``, `## Cleared (last 48h)`,
     ...(cleared.length ? cleared.map(c => `- ✅ ${c.title} [${c.monitor}]`) : ['- nothing yet']),
     ``, `## Stalling (emailed + bumped, no movement)`,
