@@ -81,56 +81,47 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
       return false;
     }
 
-    // Deterministic ADHD header — CLEARED first (dopamine, evidence-only),
-    // then open-actions index, then a system heartbeat so Zach never has to
-    // ask "is it working". Computed from the DB, never from the LLM.
-    const buildBriefHeader = (): string => {
-      const lines: string[] = [];
-      try {
-        const cleared = db.prepare(
-          "SELECT title, monitor, deliverable FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-1 day')"
-        ).all() as any[];
-        if (cleared.length) {
-          lines.push('CLEARED since yesterday:');
-          for (const c of cleared.slice(0, 5)) lines.push(`  DONE ${c.title} [${c.monitor}]${c.deliverable ? ` — file: ~/Documents/Claude/Prime/${c.deliverable}` : ''}`);
-        }
-        const openActs = db.prepare(
-          "SELECT COUNT(*) n FROM ledger WHERE tier='act' AND status='open' AND notified_at IS NOT NULL"
-        ).get() as any;
-        const queued = db.prepare(
-          "SELECT COUNT(*) n FROM ledger WHERE tier='act' AND status='open' AND notified_at IS NULL"
-        ).get() as any;
-        if (openActs.n || queued.n) {
-          lines.push(`ACTIONS: ${openActs.n} open in your inbox${queued.n ? `, ${queued.n} queued` : ''}`);
-        }
-        // actual completions in 24h, not roster size — the heartbeat must not
-        // read "7 monitors ran" on a morning when zero did (audit finding)
-        try {
-          const cov: string[] = buildCoverage(db);
-          if (cov.length) { lines.push('', 'STAFF COVERAGE (who watched what):'); for (const c of cov) lines.push(`  ${c}`); }
-          const props: any[] = getProposals(db, 3);
-          (buildBriefHeader as any).props = props;
-          if (props.length) {
-            lines.push('', 'STAFF PROPOSALS (reply to this email: "yes to #1", "no to #2", or just say what you want):');
-            props.forEach((pr: any, i: number) => lines.push(`  #${i + 1} [${String(pr.id).slice(0, 4)}] ${pr.title} [${pr.monitor}]`));
-          }
-        } catch {}
-        const monitors = (db.prepare("SELECT COUNT(*) n FROM agent_state WHERE agent_type='pm' AND last_run_at >= datetime('now','-1 day')").get() as any)?.n ?? '?';
-        const mech = db.prepare(
-          "SELECT COUNT(*) n FROM knowledge WHERE source='mechanic-report' AND created_at >= datetime('now','-1 day')"
-        ).get() as any;
-        let brokenTxt = 'health unknown';
-        try {
-          const n = readdirSync(join(homedir, '.prime', 'health-alerts')).filter((f: string) => !f.endsWith('.dispatched')).length;
-          brokenTxt = n === 0 ? 'nothing broken' : `${n} issue(s) flagged`;
-        } catch {}
-        let heldTxt = '';
-        try { const h = heldToday(db); if (h.n) heldTxt = ` · ${h.n} email${h.n === 1 ? '' : 's'} held back by the daily cap`; } catch {}
-        lines.push(`SYSTEM: ${monitors} monitors ran · ${mech.n} mechanic run${mech.n === 1 ? '' : 's'} · ${brokenTxt}${heldTxt}`);
-      } catch {}
-      return lines.join('\n');
-    };
-    const briefHeader = buildBriefHeader();
+    // Structured brief data (deterministic, from the DB) → readable HTML.
+    // Human words only: no monitor ids, ledger keys, tiers or cycle chatter.
+    const { renderBriefHtml, renderBriefText, humanTitle, monitorName, whenText } = await import('./email-format.js');
+    const { buildCoverage, getProposals } = await import('./ledger.js');
+    const { heldToday } = await import('./email-budget.js');
+    const briefData: any = { actions: [], cleared: [], proposals: [], deadlines: [], coverage: [], held: 0, system: '' };
+    try {
+      const acts = db.prepare(
+        "SELECT title, next_action, deadline, ball_since, notified_at, monitor FROM ledger WHERE tier='act' AND status='open' ORDER BY notified_at IS NULL, deadline IS NULL, deadline LIMIT 3"
+      ).all() as any[];
+      briefData.actions = acts.map((a: any) => ({
+        title: humanTitle(a.title), when: whenText(a.deadline),
+        why: a.ball_since && !a.deadline ? `waiting since ${a.ball_since}` : '', inInbox: !!a.notified_at,
+      }));
+      const cleared = db.prepare(
+        "SELECT title, deliverable FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-1 day') ORDER BY resolved_at DESC LIMIT 5"
+      ).all() as any[];
+      briefData.cleared = cleared.map((c: any) => ({ title: humanTitle(c.title), file: c.deliverable }));
+      const props: any[] = getProposals(db, 3);
+      (briefData as any).props = props;
+      briefData.proposals = props.map((pr: any, i: number) => ({ n: i + 1, title: humanTitle(pr.title.replace(/^I could\s+/i, ''), 110), from: monitorName(db, pr.monitor) }));
+      const dl = db.prepare(
+        "SELECT title, deadline FROM ledger WHERE status='open' AND deadline IS NOT NULL AND date(deadline) <= date('now','localtime','+7 days') ORDER BY date(deadline) LIMIT 6"
+      ).all() as any[];
+      briefData.deadlines = dl.map((x: any) => ({ title: humanTitle(x.title, 80), when: whenText(x.deadline) }));
+      const cov: string[] = buildCoverage(db);
+      briefData.coverage = cov.map((line: string) => {
+        const name = line.split(' — ')[0];
+        const never = /ran never/.test(line); const muted = /MUTED/.test(line);
+        return { name, ok: !never && !muted, note: never ? 'has not run yet' : muted ? 'muted (you skipped its last actions)' : '' };
+      });
+      const monitors = (db.prepare("SELECT COUNT(*) n FROM agent_state WHERE agent_type='pm' AND last_run_at >= datetime('now','-1 day')").get() as any)?.n ?? '?';
+      const mech = (db.prepare("SELECT COUNT(*) n FROM knowledge WHERE source='mechanic-report' AND created_at >= datetime('now','-1 day')").get() as any).n;
+      let brokenTxt = 'health unknown';
+      try { const n = readdirSync(join(homedir, '.prime', 'health-alerts')).filter((f: string) => !f.endsWith('.dispatched')).length; brokenTxt = n === 0 ? 'nothing broken' : `${n} issue${n === 1 ? '' : 's'} flagged`; } catch {}
+      briefData.system = `${monitors} monitors ran · ${mech} mechanic run${mech === 1 ? '' : 's'} · ${brokenTxt}`;
+      try { briefData.held = heldToday(db).n; } catch {}
+    } catch (e: any) { console.log('[quinn-email] brief data failed: ' + (e?.message || e)); }
+    const buildBriefHeader: any = () => '';
+    (buildBriefHeader as any).props = (briefData as any).props || [];
+    const briefHeader = '';
 
     // Get subject from brief or FOCUS
     const briefRaw = (db.prepare(
@@ -144,22 +135,11 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
     });
     const kbCount = (db.prepare('SELECT COUNT(*) as c FROM knowledge').get() as any)?.c || '?';
 
-    // Clean HTML email
-    const esc = (s: string) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
-    const bodyWithHeader = briefHeader ? briefHeader + '\n\n---\n\n' + emailBody : emailBody;
-
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
-<body style="margin:0;padding:0;background:#0a0e12;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-<div style="max-width:600px;margin:0 auto;padding:32px 24px;">
-  <div style="font-size:15px;color:#cbd5e1;line-height:1.7;">
-    ${esc(bodyWithHeader)}
-  </div>
-  <div style="margin-top:32px;padding-top:16px;border-top:1px solid #1e293b;">
-    <div style="font-size:13px;font-weight:500;color:#94a3b8;">Quinn Parker</div>
-    <div style="font-size:11px;color:#475569;">AI Chief of Staff, Recapture Insurance</div>
-    <div style="font-size:10px;color:#334155;margin-top:8px;">${date} | ${kbCount} items tracked | Reply to update Prime</div>
-  </div>
-</div></body></html>`;
+    // Readable HTML brief; plain-text twin is what the reply intent layer sees
+    const rawSubjectPre = brief.headline?.slice(0, 80) || (focus.match(/## The One Thing\n(.+)/)?.[1] || '').slice(0, 80) || 'Morning Brief';
+    const full = { ...briefData, date, headline: rawSubjectPre, prose: emailBody.trim() };
+    const html = renderBriefHtml(full);
+    const bodyWithHeader = renderBriefText(full);
 
     const theOneThing = focus.match(/## The One Thing\n(.+)/)?.[1] || '';
     const rawSubject = brief.headline?.slice(0, 80) || theOneThing.slice(0, 80) || 'Morning Brief';

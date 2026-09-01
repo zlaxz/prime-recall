@@ -319,6 +319,13 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
   };
 
   const subj = (s: string) => s.replace(/[\r\n]+/g, ' ').slice(0, 180);
+  const { renderActionHtml, humanTitle, monitorName, whenText } = await import('./email-format.js');
+  const htmlBody = (r: any, bump: boolean, kind: 'act' | 'remind') => {
+    let links: { label: string; url: string }[] = [];
+    try { links = r.links ? JSON.parse(r.links) : []; } catch {}
+    const why = r.ball_since && !r.deadline ? `waiting on ${r.ball === 'zach' ? 'you' : 'them'} since ${r.ball_since}` : (r.state ? String(r.state).slice(0, 140) : '');
+    return renderActionHtml({ title: humanTitle(r.title, 120), when: whenText(r.deadline), why, nextAction: r.next_action || '', draft: r.draft, links, from: monitorName(db, r.monitor), bump, kind });
+  };
   const body = (r: any, bump: boolean) => [
     bump ? 'BUMP — 48h with no visible movement. This is the last email about it; from now on the morning brief carries it.' : null,
     `${r.title}`,
@@ -360,7 +367,7 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
       const dt = daysTag(r.deadline);
       const tag = dt ? `[ACT ${slot}/${MAX_OPEN_ACT} · ${dt}]` : `[ACT ${slot}/${MAX_OPEN_ACT}]`;
       const subject = subj(`${tag} ${r.title}`);
-      const res = await sendEmail(db, { to, subject, body: body(r, false) });
+      const res = await sendEmail(db, { to, subject, body: htmlBody(r, false, 'act'), html: true });
       if (res.success) {
         db.prepare("UPDATE ledger SET notified_at=datetime('now'), notified_thread_id=?, notified_tier='act', notified_subject=? WHERE id=?")
           .run(res.threadId || null, subject, r.id);
@@ -378,7 +385,7 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
     // Reply in the original thread. Gmail threads on threadId + MATCHING
     // subject — reuse the stored original subject verbatim with Re: (audit).
     const bumpSubject = r.notified_subject ? `Re: ${r.notified_subject}` : subj(`[ACT — bump] ${r.title}`);
-    const res = await sendEmail(db, { to, subject: bumpSubject, body: body(r, true), replyToThreadId: r.notified_thread_id || undefined });
+    const res = await sendEmail(db, { to, subject: bumpSubject, body: htmlBody(r, true, 'act'), html: true, replyToThreadId: r.notified_thread_id || undefined });
     if (res.success) {
       db.prepare("UPDATE ledger SET bumped_at=datetime('now'), tier='brief' WHERE id=?").run(r.id);
       bumped++;
@@ -396,7 +403,7 @@ export async function dispatchLedger(db: Database.Database): Promise<{ sent: num
     for (const r of reminders) {
       const dt = daysTag(r.deadline) || 'due';
       const rsubject = subj(`[REMIND · ${dt}] ${r.title} (due ${r.deadline})`);
-      const res = await sendEmail(db, { to, subject: rsubject, body: body(r, false) });
+      const res = await sendEmail(db, { to, subject: rsubject, body: htmlBody(r, false, 'remind'), html: true });
       if (res.success) { db.prepare("UPDATE ledger SET notified_at=datetime('now'), notified_tier='remind', notified_subject=? WHERE id=?").run(rsubject, r.id); sent++; }
     }
   }
