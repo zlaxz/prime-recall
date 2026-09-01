@@ -723,7 +723,7 @@ export async function scanSentMail(
             title: extracted.title || `Sent: ${td.subject}`,
             summary: extracted.summary,
             source: 'gmail-sent',
-        source_account: options?.sourceAccount || userEmail,
+            source_account: userEmail,
             source_ref: `thread:${td.id}`,
             source_date: td.lastDate ? new Date(td.lastDate).toISOString() : undefined,
             contacts: extracted.contacts,

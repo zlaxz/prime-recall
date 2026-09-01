@@ -184,19 +184,9 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
         }
       }
 
-      if (member.sync_calendar) {
-        try {
-          const { scanCalendarForAccount } = await import('./calendar.js');
-          if (typeof scanCalendarForAccount === 'function') {
-            const { items } = await scanCalendarForAccount(db, member.email);
-            results.push({ source: `calendar:${member.name}`, items });
-          }
-
-        } catch (err: any) {
-          results.push({ source: `calendar:${member.name}`, items: 0, error: err.message?.slice(0, 80) });
-        }
-      }
-    
+      // Per-account calendar sync (scanCalendarForAccount) was never implemented —
+      // scanCalendar only supports the CEO's own shared OAuth tokens, not team
+      // member service accounts. member.sync_calendar is a no-op until that lands.
 
       if (member.sync_drive) {
         try {

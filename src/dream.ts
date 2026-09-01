@@ -92,32 +92,6 @@ async function callClaudeOnce(prompt: string, timeoutMs: number = 300000, sessio
 
 
 export async function callClaude(prompt: string, timeoutMs: number = 300000, sessionId?: string): Promise<string> {
-  // For persistent sessions: track turns and inject summary when context gets large
-  // Wrapped in try/catch so session management failures don't skip the retry logic below
-  if (sessionId) {
-    try {
-      const turnCount = incrementSessionTurnCount(sessionId);
-
-      if (turnCount >= SESSION_SUMMARIZE_THRESHOLD) {
-        // Trigger summarization pass before the real prompt
-        await summarizeSession(sessionId);
-        // Now inject the summary as context prefix for the next prompt
-        const summary = getSessionSummary(sessionId);
-        if (summary) {
-          prompt = `CONTEXT FROM PREVIOUS SESSION STATE (anchored summary — treat as authoritative):\n${summary}\n\n---\n\n${prompt}`;
-        }
-      } else {
-        // Below threshold but a summary exists from a previous compaction — inject it
-        const existingSummary = getSessionSummary(sessionId);
-        if (existingSummary) {
-          prompt = `CONTEXT FROM PREVIOUS SESSION STATE (anchored summary — treat as authoritative):\n${existingSummary}\n\n---\n\n${prompt}`;
-        }
-      }
-    } catch (sessionErr: any) {
-      console.log(`    Session management error (continuing without summary): ${sessionErr.message?.slice(0, 100)}`);
-    }
-  }
-
   // Strategic thinking framework REMOVED — was causing melodramatic, speculative output.
   // UPGRADE_REQUEST system note REMOVED — biased toward finding problems instead of reporting facts.
 
