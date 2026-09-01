@@ -1,26 +1,28 @@
 #!/bin/bash
-# Sync Prime wiki markdown files from Mac Mini to Obsidian vault on laptop
-# Run manually or add to crontab: */15 * * * * bash ~/GitHub/prime/scripts/sync-wiki-to-obsidian.sh
+# Prime → laptop mirror (ONE target). Runs via com.prime.obsidian-sync launchd
+# agent every 15 min.
+#
+# Simplified 2026-08-31: previously mirrored the same wikis into the Obsidian
+# vault AND Claude Desktop's file space on two rsync legs. Now everything lands
+# in Claude Desktop's folder (Cowork reads it natively) and the Obsidian vault
+# path is a symlink to it. One copy, one sync, one place.
 
-OBSIDIAN_VAULT="/Users/zstoc/ObsidianVault"
-WIKI_DIR="${OBSIDIAN_VAULT}/Projects/prime/wiki"
 MACMINI="macmini"
+PRIME_DIR="/Users/zstoc/Documents/Claude/Prime"
 
-# Create destination dirs
-mkdir -p "${WIKI_DIR}/people"
-mkdir -p "${WIKI_DIR}/projects"
+mkdir -p "${PRIME_DIR}/wiki" "${PRIME_DIR}/cycles"
 
-# Rsync wiki from Mac Mini
-rsync -az --delete "${MACMINI}:~/.prime/wiki/" "${WIKI_DIR}/" 2>/dev/null
+# Command Center (TODAY.md / LEDGER.md — regenerated hourly on the Mini)
+rsync -az "${MACMINI}:~/.prime/export/" "${PRIME_DIR}/" 2>/dev/null
 
-# Also sync FOCUS.md
-rsync -az "${MACMINI}:~/.prime/FOCUS.md" "${OBSIDIAN_VAULT}/Projects/prime/FOCUS.md" 2>/dev/null
+# Wikis (people + projects) and Quinn's working state
+rsync -az --delete "${MACMINI}:~/.prime/wiki/" "${PRIME_DIR}/wiki/" 2>/dev/null
+rsync -az "${MACMINI}:~/.prime/FOCUS.md" "${PRIME_DIR}/FOCUS.md" 2>/dev/null
 
-# Sync latest cycle output (most recent only)
+# Latest Quinn cycle (most recent only)
 LATEST_CYCLE=$(ssh ${MACMINI} "ls -t ~/.prime/cycles/*.md 2>/dev/null | head -1")
 if [ -n "$LATEST_CYCLE" ]; then
-  mkdir -p "${OBSIDIAN_VAULT}/Projects/prime/cycles"
-  rsync -az "${MACMINI}:${LATEST_CYCLE}" "${OBSIDIAN_VAULT}/Projects/prime/cycles/" 2>/dev/null
+  rsync -az "${MACMINI}:${LATEST_CYCLE}" "${PRIME_DIR}/cycles/" 2>/dev/null
 fi
 
-echo "✓ Wiki synced to ${WIKI_DIR}"
+echo "✓ Prime mirrored to ${PRIME_DIR}"
