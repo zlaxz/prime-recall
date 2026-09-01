@@ -3552,13 +3552,19 @@ export async function runDreamPipeline(
   }
 
   // ── RECURSIVE INTELLIGENCE LOOP (runs first, before data changes) ──
-  console.log('  Task 15: Prediction verification (DeepSeek)...');
-  const r15 = await task15PredictionVerification(db);
+  // Task 15 RETIRED 2026-08-31: the prediction generator (Task 09) has been off
+  // since the Apr wiki-agent migration, so this verified nothing every cycle.
+  // The ledger + monitors are the outcome loop now. Re-enable with Task 09 only.
+  console.log('  Task 15: Prediction verification — retired');
+  const r15: any = { task: '15-prediction-verification', status: 'skipped' as const, duration_seconds: 0, output: { reason: 'retired 2026-08-31 — no prediction generator' } };
   results.push(r15);
   console.log(`    ${r15.status === 'success' ? '✓' : r15.status === 'skipped' ? '○' : '✗'} ${r15.status} (${r15.duration_seconds.toFixed(1)}s)${r15.output ? ` — ${JSON.stringify(r15.output).slice(0, 120)}` : r15.error ? ` — ${r15.error.slice(0, 120)}` : ''}`);
 
-  console.log('  Task 16: Strategic reflection (Claude)...');
-  const r16 = await task16StrategicReflection(db);
+  // Task 16 RETIRED 2026-08-31: with zero predictions/outcomes to reflect on it
+  // spent an Opus call every cycle emitting "no-op" meta-insights and clogged
+  // strategic_lessons with duplicate HARD STOP rows (mechanic fixed twice).
+  console.log('  Task 16: Strategic reflection — retired');
+  const r16: any = { task: '16-strategic-reflection', status: 'skipped' as const, duration_seconds: 0, output: { reason: 'retired 2026-08-31 — nothing to reflect on; ledger is the learning loop' } };
   results.push(r16);
   console.log(`    ${r16.status === 'success' ? '✓' : r16.status === 'skipped' ? '○' : '✗'} ${r16.status} (${r16.duration_seconds.toFixed(1)}s)${r16.output ? ` — ${JSON.stringify(r16.output).slice(0, 120)}` : r16.error ? ` — ${r16.error.slice(0, 120)}` : ''}`);
 

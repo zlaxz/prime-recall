@@ -155,39 +155,17 @@ else
   fi
 fi
 
-# ── 4. Intelligence brief freshness (auto-regen) ───────
-LAST_BRIEF=$(sqlite3 "$DB" "SELECT MAX(created_at) FROM knowledge WHERE source='briefing'" 2>/dev/null)
-if [ -n "$LAST_BRIEF" ]; then
-  BRIEF_AGE=$(python3 -c "
-from datetime import datetime, timezone
-last = datetime.fromisoformat('${LAST_BRIEF}'.replace(' ', 'T'))
-if last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)
-print(int((datetime.now(timezone.utc) - last).total_seconds() / 3600))
-" 2>/dev/null)
-  if [ -n "$BRIEF_AGE" ] && [ "$BRIEF_AGE" -gt 26 ]; then
-    log "brief ${BRIEF_AGE}h stale — auto-regenerating via /api/briefing"
-    curl -s --max-time 180 http://localhost:3210/api/briefing >/dev/null 2>&1
-    NEW_BRIEF=$(sqlite3 "$DB" "SELECT MAX(created_at) FROM knowledge WHERE source='briefing'" 2>/dev/null)
-    if [ "$NEW_BRIEF" != "$LAST_BRIEF" ]; then
-      log "✓ brief regenerated"; clear_alert "$MSG_BRIEF"
-    else
-      alert "$MSG_BRIEF"
-      ISSUES=$((ISSUES + 1))
-    fi
-  else
-    clear_alert "$MSG_BRIEF"
-  fi
-fi
+# ── 4. (retired 2026-08-31) The /api/briefing artifact was a second, unread
+#      briefing generator; Quinn's daily email is THE brief. Its freshness
+#      check (4b) is the only brief check now. /api/briefing stays on-demand.
+clear_alert "$MSG_BRIEF"
 
 # ── 4b. Morning brief actually went out ────────────────
 # The brief is Zach's single surface — if it silently fails, a broken day
 # looks identical to a quiet one. Alert if nothing sent by 8am local.
 MSG_NOBRIEF="Morning brief did not go out by 8am — daily email pipeline is broken."
 HOUR_NOW=$(date +%H)
-MIN_NOW=$(date +%M)
-# 9:30 gate: with 7 sequential Opus PMs a 7:08 cycle can block ticks until
-# ~8:40; alerting at 8:00 would false-alarm near-daily (audit 2026-08-31).
-if { [ "$HOUR_NOW" -gt 9 ] || { [ "$HOUR_NOW" -eq 9 ] && [ "$MIN_NOW" -ge 30 ]; }; } && [ "$HOUR_NOW" -lt 22 ]; then
+if [ "$HOUR_NOW" -ge 8 ] && [ "$HOUR_NOW" -lt 22 ]; then
   LAST_QE=$(sqlite3 "$DB" "SELECT value FROM graph_state WHERE key='last_quinn_email'" 2>/dev/null | tr -d '"')
   TODAY_LOCAL=$(date +%Y-%m-%d)
   SENT_DAY=$(python3 -c "
@@ -295,9 +273,6 @@ if [ -x "$MECH" ]; then
     # Legacy zero-byte markers carry no message and silence future alerts
     # for their hash — remove them (audit finding 2026-08-31).
     [ -s "$f" ] || { rm -f "$f"; continue; }
-    # Brief-timing alerts are watchdog-only — a mechanic session cannot fix
-    # "the cycle is slow" and would poke the system mid-cycle (audit finding).
-    grep -q "Morning brief did not go out" "$f" 2>/dev/null && continue
     AGE=$(( NOW - $(stat -f %m "$f") ))
     [ "$AGE" -ge 900 ] || continue
     if [ -f "$f.dispatched" ] && [ $(( NOW - $(stat -f %m "$f.dispatched") )) -lt 21600 ]; then continue; fi
