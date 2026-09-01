@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from 'crypto';
+import { registerPrimeSurfaces } from './mcp-surfaces.js';
 
 /**
  * Prime Recall MCP Server
@@ -32,6 +33,10 @@ export { MCP_SERVER_CONFIG };
  * Exported so both stdio (local) and HTTP (remote) can share tool definitions.
  */
 export function registerPrimeTools(srv: McpServer) {
+  // Resources + prompts + activity tool — Prime's hidden work made visible
+  // inside the connector itself (see mcp-surfaces.ts)
+  registerPrimeSurfaces(srv);
+
 
 srv.tool(
   "prime_search",
