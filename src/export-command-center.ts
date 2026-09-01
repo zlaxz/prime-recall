@@ -1,13 +1,14 @@
 // Command Center export — living-state markdown for Zach's laptop surfaces
 // (Claude Desktop's ~/Documents/Claude/Prime + Obsidian). Generated on the
 // Mini each hourly block; the laptop's sync script pulls ~/.prime/export/.
+import Database from 'better-sqlite3';
 import { getDb } from './db.js';
 import { getBallLists } from './ledger.js';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-export function exportCommandCenter(db = getDb()): void {
+export function exportCommandCenter(db: Database.Database = getDb()): void {
   const dir = join(homedir(), '.prime', 'export');
   mkdirSync(dir, { recursive: true });
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/Denver' });

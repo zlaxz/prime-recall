@@ -82,7 +82,7 @@ export async function scanDrive(
       } catch (_e) {}
     }
 
-    let embedding: number[] | null = null;
+    let embedding: number[] | undefined = undefined;
     try {
       embedding = await generateEmbedding(ext.summary, apiKey);
     } catch (_e) {}

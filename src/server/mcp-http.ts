@@ -32,12 +32,12 @@ export function mountMcpHttp(app: Express) {
       }
 
       // New session — create transport + server
-      const transport = new StreamableHTTPServerTransport({
+      const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         // Session id is assigned DURING handleRequest(initialize) — storing the
         // transport before that ran left the map empty and every follow-up
         // request hit a fresh uninitialized transport.
-        onsessioninitialized: (sid) => transports.set(sid, transport),
+        onsessioninitialized: (sid: string) => { transports.set(sid, transport); },
       });
 
       const server = new McpServer(MCP_SERVER_CONFIG);

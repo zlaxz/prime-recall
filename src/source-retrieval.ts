@@ -294,7 +294,7 @@ except:
 
 export async function retrieveSourceContent(
   db: Database.Database,
-  item: { source: string; source_ref: string; metadata?: any }
+  item: { source: string; source_ref: string; metadata?: any; source_account?: string }
 ): Promise<RetrievedSource | null> {
   const meta = typeof item.metadata === 'string' ? JSON.parse(item.metadata) : (item.metadata || {});
 
