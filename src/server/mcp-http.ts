@@ -12,6 +12,7 @@ import { randomUUID } from 'crypto';
 import type { Express, Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { registerPrimeTools, MCP_SERVER_CONFIG } from './mcp.js';
+import { isValidBearer } from './oauth.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 const MCP_PATH = process.env.PRIME_MCP_PATH || '/mcp';
@@ -48,6 +49,15 @@ export function mountMcpHttp(app: Express) {
 
   // Handle MCP requests (POST for messages, GET for SSE stream, DELETE for cleanup)
   app.all(MCP_PATH, async (req: Request, res: Response) => {
+    // OAuth-protected resource (RFC 9728): unauthenticated requests get a 401 challenge
+    const authHeader = String(req.headers.authorization || '');
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    if (!bearer || !isValidBearer(bearer)) {
+      res.status(401)
+        .set('WWW-Authenticate', "Bearer realm=\"prime\", resource_metadata=\"https://prime.recaptureinsurance.com/.well-known/oauth-protected-resource\"")
+        .json({ error: 'unauthorized', error_description: 'valid bearer token required' });
+      return;
+    }
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
     if (req.method === 'POST') {

@@ -12,6 +12,7 @@ import { v4 as uuid } from 'uuid';
 import { processOtterMeeting } from '../connectors/otter.js';
 import { startScheduler } from '../scheduler.js';
 import { registerPrimeTools, MCP_SERVER_CONFIG } from './mcp.js';
+import { isValidBearer as oauthValidBearer } from './oauth.js';
 
 // Secret MCP path: set PRIME_MCP_PATH=/mcp-<random> in .env; old /mcp then falls under API-key auth
 const MCP_PATH = process.env.PRIME_MCP_PATH || '/mcp';
@@ -1660,6 +1661,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   const mcpTransports = new Map<string, SSEServerTransport>();
 
   app.get('/mcp-sse-legacy', async (req, res) => {
+    const lg = String(req.headers.authorization || '');
+    if (!lg.startsWith('Bearer ') || !oauthValidBearer(lg.slice(7))) { res.status(401).json({ error: 'unauthorized' }); return; }
     try {
       const transport = new SSEServerTransport('/mcp-sse-legacy/messages', res);
       const sessionId = transport.sessionId;
