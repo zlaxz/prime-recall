@@ -23,6 +23,13 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // cloudflared delivers tunnel traffic from 127.0.0.1; without this, req.ip is
   // always localhost and the localhost auth exemption applies to the whole internet.
   app.set('trust proxy', 1);
+  // TEMP diagnostic: log every non-API request with its final status
+  app.use((req, res, next) => {
+    if (!req.path.startsWith('/api/')) {
+      res.on('finish', () => console.log('  [req] ' + req.method + ' ' + req.path.slice(0, 50) + ' -> ' + res.statusCode));
+    }
+    next();
+  });
   app.use(express.json({ limit: '10mb' }));
 
   // ── SECURITY: API Key Authentication ──
@@ -35,6 +42,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     'http://localhost:8080',                    // Local dev (prime-production)
     'https://prime.recaptureinsurance.com',     // Self (tunnel)
     'https://prime-command.lovable.app',        // Published Lovable app
+    'https://claude.ai',                        // claude.ai web (MCP connector check runs in the browser)
   ];
 
   app.use((_req, res, next) => {
@@ -44,7 +52,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
       res.header('Access-Control-Allow-Origin', origin);
     }
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, mcp-session-id');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, mcp-session-id, mcp-protocol-version');
+    res.header('Access-Control-Expose-Headers', 'mcp-session-id');
     if (_req.method === 'OPTIONS') return res.sendStatus(200);
     next();
   });
@@ -52,7 +61,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // Auth middleware — require API key for untrusted requests
   app.use((req, res, next) => {
     // Skip auth for health/status/MCP
-    if (req.path === '/api/health' || req.path === '/api/status' || req.path.startsWith(MCP_PATH) || req.path.startsWith('/.well-known/')) return next();
+    if (req.path === '/api/health' || req.path === '/api/status' || req.path.startsWith(MCP_PATH) || req.path.startsWith('/.well-known/') || req.path === '/register' || req.path.startsWith('/authorize') || req.path === '/token') return next();
     // Skip auth for localhost
     const ip = req.ip || req.socket.remoteAddress || '';
     if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
@@ -63,7 +72,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     if (API_KEY) {
       const key = (req.headers['x-api-key'] as string) || req.headers.authorization?.replace('Bearer ', '');
       if (!key || key !== API_KEY) {
-        console.log('  [auth 401] ' + req.method + ' ' + req.path);
+        console.log('  [auth 401] ' + req.method + ' url=' + JSON.stringify(req.originalUrl) + ' path=' + JSON.stringify(req.path) + ' mcpPath=' + JSON.stringify(MCP_PATH) + ' starts=' + req.path.startsWith(MCP_PATH));
         return res.status(401).json({ error: 'unauthorized' });
       }
     }
@@ -2700,6 +2709,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
 
   // ── Mount MCP over HTTP for claude.ai remote access ──
   try {
+    const { mountOAuth } = await import('./oauth.js');
+    mountOAuth(app);
     const { mountMcpHttp } = await import('./mcp-http.js');
     mountMcpHttp(app);
   } catch (err: any) {
