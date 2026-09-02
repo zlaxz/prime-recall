@@ -14,6 +14,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { registerPrimeTools, MCP_SERVER_CONFIG } from './mcp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
+const MCP_PATH = process.env.PRIME_MCP_PATH || '/mcp';
+
 // Track active transports by session ID
 const transports = new Map<string, StreamableHTTPServerTransport>();
 
@@ -45,7 +47,7 @@ export function mountMcpHttp(app: Express) {
   setInterval(sweepIdleSessions, SESSION_SWEEP_INTERVAL_MS);
 
   // Handle MCP requests (POST for messages, GET for SSE stream, DELETE for cleanup)
-  app.all('/mcp', async (req: Request, res: Response) => {
+  app.all(MCP_PATH, async (req: Request, res: Response) => {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
     if (req.method === 'POST') {
@@ -105,5 +107,5 @@ export function mountMcpHttp(app: Express) {
     }
   });
 
-  console.log('  MCP HTTP endpoint mounted at /mcp');
+  console.log('  MCP HTTP endpoint mounted at ' + MCP_PATH.slice(0, 8) + (MCP_PATH.length > 8 ? '…' : ''));
 }

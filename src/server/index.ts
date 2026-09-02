@@ -12,6 +12,9 @@ import { v4 as uuid } from 'uuid';
 import { processOtterMeeting } from '../connectors/otter.js';
 import { startScheduler } from '../scheduler.js';
 import { registerPrimeTools, MCP_SERVER_CONFIG } from './mcp.js';
+
+// Secret MCP path: set PRIME_MCP_PATH=/mcp-<random> in .env; old /mcp then falls under API-key auth
+const MCP_PATH = process.env.PRIME_MCP_PATH || '/mcp';
 import { getAmbientDisplayHTML } from './ambient-display.js';
 import { mutateSoulFromCorrection } from '../soul-mutation.js';
 
@@ -46,7 +49,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // Auth middleware — require API key for untrusted requests
   app.use((req, res, next) => {
     // Skip auth for health/status/MCP
-    if (req.path === '/api/health' || req.path === '/api/status' || req.path.startsWith('/mcp')) return next();
+    if (req.path === '/api/health' || req.path === '/api/status' || req.path.startsWith(MCP_PATH)) return next();
     // Skip auth for localhost
     const ip = req.ip || req.socket.remoteAddress || '';
     if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
@@ -1643,9 +1646,9 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // GET /mcp establishes SSE stream, POST /mcp/messages sends JSON-RPC
   const mcpTransports = new Map<string, SSEServerTransport>();
 
-  app.get('/mcp', async (req, res) => {
+  app.get(MCP_PATH, async (req, res) => {
     try {
-      const transport = new SSEServerTransport('/mcp/messages', res);
+      const transport = new SSEServerTransport(MCP_PATH + '/messages', res);
       const sessionId = transport.sessionId;
       mcpTransports.set(sessionId, transport);
 
@@ -1664,7 +1667,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     }
   });
 
-  app.post('/mcp/messages', async (req, res) => {
+  app.post(MCP_PATH + '/messages', async (req, res) => {
     const sessionId = req.query.sessionId as string;
     if (!sessionId) {
       res.status(400).send('Missing sessionId parameter');
