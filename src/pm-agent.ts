@@ -184,6 +184,21 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     }
   } catch {}
 
+  // Zach's own words (email replies / notes routed through the intent layer) — every monitor sees them.
+  let directivesBlock = '';
+  try {
+    const drows = db.prepare("SELECT summary, created_at FROM knowledge WHERE source='directive' AND created_at >= datetime('now','-7 days') ORDER BY created_at DESC LIMIT 8").all() as any[];
+    if (drows.length) {
+      directivesBlock = "## ZACH'S OWN WORDS (recent replies/notes — these override your judgment)\n" +
+        drows.map((d: any) => '- [' + String(d.created_at).slice(0, 10) + '] ' + String(d.summary || '').replace(/\s+/g, ' ').slice(0, 240)).join('\n') +
+        '\nIf any of these touch YOUR items: obey them. If Zach said he will not do something, stop drafting toward it — re-tier the item to brief/wiki or resolve it, and never attach a draft that contradicts his stated position.\n';
+    }
+  } catch {}
+
+  // How Zach actually writes — curated real sent-mail samples; drafts must match this voice.
+  const voiceRaw = readFile(join(getAgentDir('shared'), 'VOICE.md'));
+  const voiceBlock = voiceRaw ? '## HOW ZACH ACTUALLY WRITES (real sent-mail samples — match this voice in every draft)\n' + voiceRaw.slice(0, 3000) + '\n' : '';
+
   const prompt = [
     soul || `You are the PM for ${config.project}.`,
     '',
@@ -194,6 +209,8 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     lastWikiPage ? `## MY LAST WIKI PAGE\n${lastWikiPage.slice(0, 3000)}\n` : '',
     acceptedBlock,
     keysBlock,
+    directivesBlock,
+    voiceBlock,
     '',
     'You have MCP tools. Use them to investigate what\'s new since your last cycle.',
     'Search for recent emails, check commitments, check the calendar.',
@@ -221,6 +238,13 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     '---LEDGER---',
     '(JSON array of ball-in-play items for your domain — the structured version of your wiki. Each: {"item":"stable-key-that-matches-prior-cycles","title":"short human line","counterparty":"who","state":"where it stands","ball":"zach|other","ball_since":"YYYY-MM-DD","deadline":"YYYY-MM-DD or null","next_action":"one concrete step","draft":"ready-to-send text or null","tier":"act|remind|brief|wiki","status":"open|resolved"}.',
     'TIER RULES — tier "act" ONLY when ALL THREE hold: a finished draft is attached, delay costs something real (deadline/stall/money/legal), and only Zach can do it. Deadline-shaped with no decision → "remind". Awareness only → "brief". Something YOU watch → "wiki". Overuse of "act" makes every alert meaningless.',
+    'DRAFT RULES — a draft goes out under Zach\'s name. It must sound like him and contain nothing he cannot stand behind:',
+    '- VOICE: match the HOW ZACH ACTUALLY WRITES samples above — short sentences, direct, no filler. Never "I hope this finds you well", never manufactured enthusiasm, never an invented excuse or backstory. Zach does not explain himself unprompted.',
+    '- LENGTH: default under 90 words; hard ceiling 140. If the task genuinely needs formal or legal language, that is a DELIVERABLE document, not an email draft.',
+    '- ONE PURPOSE: the draft does exactly the item\'s next_action — one ask or one piece of information. No bundled asks, no recap of history the counterparty already knows.',
+    '- FACTS: every statement in a draft carries the same evidence bar as your wiki. If a fact you need is unverified, write [CHECK: what to confirm] in its place — a visible placeholder is fine; a fabrication in Zach\'s mouth is the worst failure this system can produce.',
+    '- CONTEXT: before drafting a reply, retrieve the latest message in that thread and answer what the counterparty actually asked, in their terms.',
+    '- POSITION: if ZACH\'S OWN WORDS above state a position touching this item, the draft follows it exactly — or you emit "draft": null and re-tier the item.',
     'ATTACHMENTS: search results with source attachment-index are document CARDS (dec pages, signed agreements, loss runs, filings). When a task turns on what a document actually says, call prime_read_attachment with the card\'s message_id and filename to read it live. Cite documents you read as [VERIFIED: attachment:message_id:filename].',
     'PROPOSALS RULE: you may include at most ONE ledger item per cycle with "tier":"propose" — an OFFER of something you COULD do for Zach beyond your current instructions: a document (claim chronology, renewal package, comparison sheet), a research task, a new watch item, a draft he did not ask for. Title it as an offer ("I could build…"), put the concrete plan in next_action, ball "agent", no deadline. Never propose sending anything to a third party. Do not re-propose something already declined.',
     'RESOURCES RULE: every act/remind item should include "links": [{"label":"...","url":"..."}] — up to 4. Convert the thread ids you cite into Gmail deep links: https://mail.google.com/mail/u/0/#all/THREAD_ID (drop the "thread:" prefix). CRITICALLY: hunt for the artifact that would COMPLETE the task (the policy document, the filing portal, the attachment) — link the email that carries it, a Drive URL if one appears in the record, or the official portal URL if one is cited in the sources. If the completing artifact does NOT exist in the record after searching, say so explicitly in next_action ("searched: no renewed dec page exists in email history") — a verified absence is decisive information.',
