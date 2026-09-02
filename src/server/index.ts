@@ -63,7 +63,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     if (API_KEY) {
       const key = (req.headers['x-api-key'] as string) || req.headers.authorization?.replace('Bearer ', '');
       if (!key || key !== API_KEY) {
-        console.log(\`  [auth 401] \${req.method} \${req.path}\`);
+        console.log('  [auth 401] ' + req.method + ' ' + req.path);
         return res.status(401).json({ error: 'unauthorized' });
       }
     }
