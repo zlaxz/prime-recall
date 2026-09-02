@@ -52,7 +52,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // Auth middleware — require API key for untrusted requests
   app.use((req, res, next) => {
     // Skip auth for health/status/MCP
-    if (req.path === '/api/health' || req.path === '/api/status' || req.path.startsWith(MCP_PATH)) return next();
+    if (req.path === '/api/health' || req.path === '/api/status' || req.path.startsWith(MCP_PATH) || req.path.startsWith('/.well-known/')) return next();
     // Skip auth for localhost
     const ip = req.ip || req.socket.remoteAddress || '';
     if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
