@@ -61,7 +61,7 @@ export function exportCommandCenter(db: Database.Database = getDb(), opts: { wri
   const quinnLink = (r: any) => mdUrl('claude://claude.ai/new?q=' + encodeURIComponent(
     `You are Quinn (Prime relay). Help me with this action: "${r.title}". Next step on file: ${r.next_action || 'n/a'}. Use prime tools to pull the sources, then give me one recommendation.`));
   const coworkLink = (r: any) => mdUrl('claude://cowork/new?q=' + encodeURIComponent(
-    `Work this Prime action end to end: "${r.title}". Next step: ${r.next_action || 'n/a'}. Read the attached TODAY.md for context. Do not send email to anyone — draft only.`)
+    `Work this Prime action end to end: "${r.title}". Next step: ${r.next_action || 'n/a'}. Read the attached TODAY.md for context. Do not send email to anyone and do not create Gmail drafts — put any proposed email text directly in your reply so Zach can copy, edit, and send it himself.`)
     + '&file=' + encodeURIComponent(TODAY_PATH));
 
   const today: string[] = [

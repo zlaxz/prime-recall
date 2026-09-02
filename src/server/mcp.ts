@@ -622,6 +622,27 @@ srv.tool(
 );
 
 srv.tool(
+  "prime_purge_drafts",
+  "Purge Zach's unused Gmail drafts. SAFE: moves drafts to Trash (recoverable for 30 days), never permanently deletes. Modes: 'junk' = empty drafts and test-drafts-to-self; 'resolved' = drafts matching a Prime ledger item that is now resolved/dismissed; 'stale' = drafts older than staleDays that match any Prime ledger item. Personal drafts (no ledger match) are NEVER touched. Use dry:true first to preview. If the result is an unauthorized_client error, the service account lacks gmail.modify delegation — Zach must add https://www.googleapis.com/auth/gmail.modify in Workspace Admin > Security > API Controls > Domain-wide delegation.",
+  {
+    mode: z.enum(["junk", "resolved", "stale"]).describe("What to purge"),
+    dry: z.boolean().optional().describe("Preview only — list what would be trashed without trashing (default false)"),
+    staleDays: z.number().optional().describe("For mode 'stale': age threshold in days (default 14)"),
+  },
+  async ({ mode, dry, staleDays }) => {
+    try {
+      const { purgeDrafts } = await import('../draft-purge.js');
+      const r = await purgeDrafts(mode, { dry: !!dry, staleDays: staleDays || 14 });
+      const lines = r.lines.slice(0, 40);
+      lines.push(`[${mode}${dry ? ' DRY' : ''}] trashed:${r.trashed} kept:${r.kept} (Trash keeps them 30 days)`);
+      return { content: [{ type: "text" as const, text: lines.join('\n') }] };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Purge failed: ${String(e?.message || e).slice(0, 300)}` }] };
+    }
+  }
+);
+
+srv.tool(
   "prime_read_attachment",
   "Read the CONTENTS of an email attachment on demand — PDF, doc/docx, rtf, txt, csv (NOT xlsx yet; say so if asked). Attachment index cards appear in search results as source 'attachment-index' with a message_id and filename in their summary/metadata. Use this when a task needs what a document actually SAYS — a policy dec page, a signed agreement, loss runs, a filing. Bytes are fetched live from Gmail and extracted; nothing is stored. Scanned PDFs without a text layer return a clear note instead of text.",
   {
