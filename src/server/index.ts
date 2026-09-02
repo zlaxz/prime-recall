@@ -63,6 +63,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     if (API_KEY) {
       const key = (req.headers['x-api-key'] as string) || req.headers.authorization?.replace('Bearer ', '');
       if (!key || key !== API_KEY) {
+        console.log(\`  [auth 401] \${req.method} \${req.path}\`);
         return res.status(401).json({ error: 'unauthorized' });
       }
     }
@@ -1649,9 +1650,9 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // GET /mcp establishes SSE stream, POST /mcp/messages sends JSON-RPC
   const mcpTransports = new Map<string, SSEServerTransport>();
 
-  app.get(MCP_PATH, async (req, res) => {
+  app.get('/mcp-sse-legacy', async (req, res) => {
     try {
-      const transport = new SSEServerTransport(MCP_PATH + '/messages', res);
+      const transport = new SSEServerTransport('/mcp-sse-legacy/messages', res);
       const sessionId = transport.sessionId;
       mcpTransports.set(sessionId, transport);
 
@@ -1670,7 +1671,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     }
   });
 
-  app.post(MCP_PATH + '/messages', async (req, res) => {
+  app.post('/mcp-sse-legacy/messages', async (req, res) => {
     const sessionId = req.query.sessionId as string;
     if (!sessionId) {
       res.status(400).send('Missing sessionId parameter');
