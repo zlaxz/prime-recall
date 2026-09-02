@@ -20,6 +20,9 @@ import { mutateSoulFromCorrection } from '../soul-mutation.js';
 
 export async function startServer(port: number = 3210, options: { sync?: boolean; syncInterval?: number } = {}) {
   const app = express();
+  // cloudflared delivers tunnel traffic from 127.0.0.1; without this, req.ip is
+  // always localhost and the localhost auth exemption applies to the whole internet.
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '10mb' }));
 
   // ── SECURITY: API Key Authentication ──
