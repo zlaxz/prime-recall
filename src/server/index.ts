@@ -24,13 +24,6 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // cloudflared delivers tunnel traffic from 127.0.0.1; without this, req.ip is
   // always localhost and the localhost auth exemption applies to the whole internet.
   app.set('trust proxy', 1);
-  // TEMP diagnostic: log every non-API request with its final status
-  app.use((req, res, next) => {
-    if (!req.path.startsWith('/api/')) {
-      res.on('finish', () => console.log('  [req] ' + req.method + ' ' + req.path.slice(0, 50) + ' -> ' + res.statusCode));
-    }
-    next();
-  });
   app.use(express.json({ limit: '10mb' }));
 
   // ── SECURITY: API Key Authentication ──
@@ -73,7 +66,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     if (API_KEY) {
       const key = (req.headers['x-api-key'] as string) || req.headers.authorization?.replace('Bearer ', '');
       if (!key || key !== API_KEY) {
-        console.log('  [auth 401] ' + req.method + ' url=' + JSON.stringify(req.originalUrl) + ' path=' + JSON.stringify(req.path) + ' mcpPath=' + JSON.stringify(MCP_PATH) + ' starts=' + req.path.startsWith(MCP_PATH));
+        console.log('  [auth 401] ' + req.method + ' ' + req.path.slice(0, 60));
         return res.status(401).json({ error: 'unauthorized' });
       }
     }

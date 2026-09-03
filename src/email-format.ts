@@ -83,7 +83,7 @@ export interface BriefData {
 }
 export function renderBriefText(d: BriefData): string {
   const L: string[] = [d.headline, '', d.prose, ''];
-  if (d.actions.length) { L.push('YOUR ACTIONS TODAY'); d.actions.forEach((a, i) => L.push(`${i + 1}. ${a.title}${a.when ? ` — ${a.when}` : ''}${a.inInbox ? ' (email in your inbox)' : ''}`)); L.push(''); }
+  if (d.actions.length) { L.push('YOUR ACTIONS TODAY'); d.actions.forEach((a, i) => L.push(`${i + 1}. ${a.title}${a.when ? ` — ${a.when}` : ''}${a.inInbox ? ' (email in your inbox)' : ''}`)); if ((d as any).queued) L.push(`   …plus ${(d as any).queued} more queued behind the 3-slot cap`); L.push(''); }
   if (d.cleared.length) { L.push('CLEARED'); d.cleared.forEach(c => L.push(`✓ ${c.title}`)); L.push(''); }
   if (d.proposals.length) { L.push('STAFF PROPOSALS — reply "yes to #1" / "no to #2"'); d.proposals.forEach(pr => L.push(`#${pr.n} ${pr.title} (${pr.from})`)); L.push(''); }
   if (d.quinnApproved && d.quinnApproved.length) { L.push('QUINN APPROVED (say "no" to stop)'); d.quinnApproved.forEach(q => L.push(`- ${q.title} (${q.from})`)); L.push(''); }
@@ -105,6 +105,7 @@ export function renderBriefHtml(d: BriefData): string {
         <div style="font-size:15px;font-weight:600;">${i + 1}. ${esc(a.title)}</div>
         <div style="font-size:13px;color:${C.muted};margin-top:2px;">${esc([a.when, humanWhy(a.why)].filter(Boolean).join(' · '))}${a.inInbox ? ` · <span style="color:${C.accent}">draft in your inbox</span>` : ''}</div>
       </div>`));
+    if ((d as any).queued) inner.push(`<div style="font-size:12px;color:${C.muted};margin:4px 0 0 4px;">…plus ${(d as any).queued} more queued behind the 3-slot cap</div>`);
   }
   if (d.cleared.length) {
     inner.push(h('Cleared'));

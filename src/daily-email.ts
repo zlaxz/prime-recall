@@ -95,6 +95,7 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
         title: humanTitle(a.title), when: whenText(a.deadline),
         why: a.ball_since && !a.deadline ? `waiting since ${a.ball_since}` : '', inInbox: !!a.notified_at,
       }));
+      briefData.queued = Math.max(0, (db.prepare("SELECT COUNT(*) n FROM ledger WHERE tier='act' AND status='open'").get() as any).n - acts.length);
       const cleared = db.prepare(
         "SELECT title, deliverable FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-1 day') ORDER BY resolved_at DESC LIMIT 5"
       ).all() as any[];

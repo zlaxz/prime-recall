@@ -312,8 +312,48 @@ export function getLedgerDigest(db: Database.Database): string {
 
 // Turn ledger state into at most a trickle of emails. Caps are structural:
 // scarcity survives classifier bad days. All day-windows are LOCAL days.
+// Hygiene pass — the system must retire balls as readily as it creates them,
+// or the caps just hide a growing junk drawer. Runs hourly inside dispatch.
+export function ledgerHygiene(db: Database.Database): { demotedActs: number; retiredReminds: number; dupes: number } {
+  ensureLedger(db);
+  // 1) act items that never won a notification slot within 5 days stop claiming one
+  const demotedActs = db.prepare(
+    "UPDATE ledger SET tier='brief', updated_at=datetime('now') WHERE tier='act' AND status='open' AND notified_at IS NULL AND created_at < datetime('now','-5 days')"
+  ).run().changes;
+  // 2) reminders whose deadline passed 3+ days ago, or deadline-less ones with no movement in 7 days, retire to wiki
+  const retiredReminds = db.prepare(
+    "UPDATE ledger SET tier='wiki', updated_at=datetime('now') WHERE tier='remind' AND status='open' AND ((deadline IS NOT NULL AND date(deadline) < date('now','-3 days')) OR (deadline IS NULL AND updated_at < datetime('now','-7 days')))"
+  ).run().changes;
+  // 3) cross-monitor duplicates: one ball, two monitors. Keeper = already-notified first, else the elder.
+  let dupes = 0;
+  const open = db.prepare(
+    "SELECT id, monitor, item, title, counterparty, notified_at, created_at FROM ledger WHERE status='open' AND tier IN ('act','remind','brief') AND monitor <> 'claude-session' ORDER BY created_at"
+  ).all() as any[];
+  const wordSet = (t: string) => new Set((String(t || '').toLowerCase().match(/[a-z]{4,}/g) || []));
+  const gone = new Set<number>();
+  for (let i = 0; i < open.length; i++) {
+    for (let j = i + 1; j < open.length; j++) {
+      let a = open[i], b = open[j];
+      if (gone.has(a.id) || gone.has(b.id) || a.monitor === b.monitor) continue;
+      const wa = wordSet(a.title + ' ' + (a.counterparty || '')), wb = wordSet(b.title + ' ' + (b.counterparty || ''));
+      if (wa.size < 3 || wb.size < 3) continue;
+      let hit = 0; wa.forEach(w => { if (wb.has(w)) hit++; });
+      if (hit / (wa.size + wb.size - hit) < 0.5) continue;
+      if (b.notified_at && !a.notified_at) { const t = a; a = b; b = t; } // keep the one Zach has seen
+      db.prepare("UPDATE ledger SET tier='wiki', triage_note=?, updated_at=datetime('now') WHERE id=?")
+        .run('duplicate of ' + a.monitor + '/' + a.item + ' (hygiene)', b.id);
+      gone.add(b.id); dupes++;
+    }
+  }
+  return { demotedActs, retiredReminds, dupes };
+}
+
 export async function dispatchLedger(db: Database.Database): Promise<{ sent: number; bumped: number }> {
   ensureLedger(db);
+  try {
+    const hy = ledgerHygiene(db);
+    if (hy.demotedActs + hy.retiredReminds + hy.dupes) console.log('  [ledger-hygiene] acts->brief ' + hy.demotedActs + ', reminds->wiki ' + hy.retiredReminds + ', dupes->wiki ' + hy.dupes);
+  } catch (e: any) { console.log('  [ledger-hygiene] failed: ' + String(e?.message || e).slice(0, 100)); }
   const { sendEmail } = await import('./connectors/gmail.js');
   const to = 'zach.stock@recaptureinsurance.com';
   let sent = 0, bumped = 0;
