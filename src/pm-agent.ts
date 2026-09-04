@@ -117,7 +117,7 @@ async function callProxy(prompt: string, maxTurns: number, timeoutSec: number): 
   const execFileAsync = promisify(execFile);
 
   // Always fresh session — no --resume. Persistent memory lives in files, not session context.
-  const args = ['--model', 'claude-opus-4-7', '--max-turns', String(maxTurns)];
+  const args = ['--model', 'claude-sonnet-5', '--max-turns', String(maxTurns)]; // monitors: routine investigation — Sonnet 5; Quinn keeps Opus
 
   const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
   const tmpPath = `/tmp/pm-proxy-${Date.now()}.json`;

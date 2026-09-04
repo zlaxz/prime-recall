@@ -237,6 +237,27 @@ async function tick() {
       ).all() as any[];
       for (const pm of roster.map((r: any) => ({ project: r.project, agentId: r.agent_id }))) {
         try {
+          // Cadence: each monitor runs once per LOCAL day, in the first full cycle
+          // after the 7am wake — fresh for the brief, idle the rest of the day.
+          const lastRunRaw = (db.prepare(
+            "SELECT last_run_at FROM agent_state WHERE subject_id = ? ORDER BY last_run_at DESC LIMIT 1"
+          ).get(pm.project) as any)?.last_run_at;
+          if (lastRunRaw) {
+            const lastLocal = new Date(String(lastRunRaw).replace(' ', 'T') + 'Z').toLocaleDateString('en-CA');
+            const todayLocal = new Date().toLocaleDateString('en-CA');
+            if (lastLocal === todayLocal) {
+              console.log('[shift]   PM ' + pm.agentId + ': skipped (ran today)');
+              continue;
+            }
+            // Delta gate: a quiet inbox means there is nothing for the monitor to learn
+            const fresh = (db.prepare(
+              "SELECT COUNT(*) n FROM knowledge WHERE source IN ('gmail','gmail-sent','fireflies') AND created_at > ?"
+            ).get(lastRunRaw) as any).n;
+            if (!fresh) {
+              console.log('[shift]   PM ' + pm.agentId + ': skipped (no new mail since last run)');
+              continue;
+            }
+          }
           const result = await runPMAgent(db, pm);
           console.log('[shift]   PM ' + pm.agentId + ': done (' + (result.durationMs / 1000).toFixed(0) + 's)');
         } catch (pmErr: any) {
