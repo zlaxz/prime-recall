@@ -166,9 +166,10 @@ clear_alert "$MSG_BRIEF"
 MSG_NOBRIEF="Morning brief did not go out by 9:30 — daily email pipeline is broken."
 HOUR_NOW=$(date +%H)
 MIN_NOW=$(date +%M)
+DOW_NOW=$(date +%u)  # 6=Sat 7=Sun — weekends have no brief by design
 # 9:30 gate: with 7 sequential Opus PMs a 7:08 cycle can block ticks until
 # ~8:40; alerting at 8:00 would false-alarm near-daily (audit 2026-08-31).
-if { [ "$HOUR_NOW" -gt 9 ] || { [ "$HOUR_NOW" -eq 9 ] && [ "$MIN_NOW" -ge 30 ]; }; } && [ "$HOUR_NOW" -lt 22 ]; then
+if [ "$DOW_NOW" -lt 6 ] && { [ "$HOUR_NOW" -gt 9 ] || { [ "$HOUR_NOW" -eq 9 ] && [ "$MIN_NOW" -ge 30 ]; }; } && [ "$HOUR_NOW" -lt 22 ]; then
   LAST_QE=$(sqlite3 "$DB" "SELECT value FROM graph_state WHERE key='last_quinn_email'" 2>/dev/null | tr -d '"')
   TODAY_LOCAL=$(date +%Y-%m-%d)
   SENT_DAY=$(python3 -c "

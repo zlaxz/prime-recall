@@ -74,10 +74,14 @@ async function tick() {
     console.log(`[shift]   Sync error: ${err.message?.slice(0, 60)}`);
   }
 
+  // Weekends are off: no monitors, no Quinn, no brief, no outbound ledger
+  // email Sat/Sun (Zach, 2026-09-04). Sync and reply handling keep running.
+  const isWeekend = [0, 6].includes(new Date().getDay());
+
   // ── DAILY EMAIL — tick-level, independent of the 4h cycle (audit fix) ──
   // Fires on the first tick at/after 7:30 local; window extends to 12:59 so a
   // crashed/blocked morning cycle still gets a late brief instead of none.
-  try {
+  if (!isWeekend) try {
     const lastEmailRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_quinn_email'").get() as any)?.value;
     const lastEmail = lastEmailRaw ? new Date(JSON.parse(lastEmailRaw)).getTime() : 0;
     const hoursSinceEmail = (Date.now() - lastEmail) / 3600000;
@@ -110,7 +114,7 @@ async function tick() {
     }
 
     // Ledger → [ACT]/[REMIND] emails to Zach (scarcity-capped; drafts only, he sends)
-    try {
+    if (!isWeekend) try {
       const { dispatchLedger } = await import('./ledger.js');
       const d = await dispatchLedger(db);
       if (d.sent || d.bumped) console.log(`[shift]   Ledger: ${d.sent} action/reminder emails, ${d.bumped} bumps`);
@@ -166,7 +170,8 @@ async function tick() {
   const lastFullRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_full_cycle'").get() as any)?.value;
   const lastFull = lastFullRaw ? new Date(JSON.parse(lastFullRaw)).getTime() : 0;
 
-  if (Date.now() - lastFull > 4 * HOUR_MS) {
+  if (isWeekend && Date.now() - lastFull > 4 * HOUR_MS) console.log('[shift]   Weekend — full cycle skipped');
+  if (!isWeekend && Date.now() - lastFull > 4 * HOUR_MS) {
     // Stamp last_full_cycle BEFORE running the heavy work, not after.
     // Otherwise, if the daemon OOMs/crashes mid-cycle (wiki compile, PM agents,
     // Quinn on Opus, etc.), launchd KeepAlive restarts it within 60s and the
