@@ -209,6 +209,13 @@ async function tick() {
     }
     logMem('post-dream');
 
+    // Wiki compile + verification: DeepSeek's biggest spenders — once per local
+    // day is all the once-daily monitors and brief actually consume.
+    const wikiDayNow = new Date().toLocaleDateString('en-CA');
+    const lastWikiDay = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_wiki_day'").get() as any)?.value;
+    if (lastWikiDay === wikiDayNow) {
+      console.log('[shift]   Wiki compile + verification: skipped (ran today)');
+    } else {
     // NEW: Wiki compilation via DeepSeek agents (reads actual sources)
     console.log('[shift]   Compiling wiki pages (DeepSeek agents)...');
     try {
@@ -229,6 +236,8 @@ async function tick() {
       console.log("[shift]   Verification: " + verResult.verified + "/" + verResult.totalClaims + " verified (" + rate + "%), " + verResult.incorrect + " flagged (" + (verResult.durationMs / 1000).toFixed(0) + "s)");
     } catch (err: any) {
       console.log("[shift]   Verification failed: " + (err.message || "").slice(0, 60));
+    }
+    db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_wiki_day', ?, datetime('now'))").run(wikiDayNow);
     }
     logMem('post-verification');
     // NEW: PM agents (Opus, persistent sessions, active projects only)

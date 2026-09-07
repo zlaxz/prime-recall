@@ -33,8 +33,10 @@ export interface AgentResult {
 }
 
 const DEFAULT_OPTIONS: Required<AgentOptions> = {
-  model: 'deepseek-reasoner',
-  maxTurns: 100,
+  // Bulk work runs on chat — reasoner burned ~$50/day compiling wikis (2026-09-07).
+  // Callers that truly need reasoning pass model explicitly.
+  model: 'deepseek-chat',
+  maxTurns: 60,
   maxTokens: 16000,
   temperature: 0.5,
   toolResultLimit: 12000,
