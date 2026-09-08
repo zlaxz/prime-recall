@@ -473,11 +473,15 @@ export function getAlerts(db: Database.Database): AlertItem[] {
       // Check if this person has a known communication cadence
       // Only alert if the gap is abnormal for this relationship
       const relType = e.user_label || e.relationship_type;
+      // Machines and strangers cannot "go cold" — newsletters with hundreds of
+      // mentions were burying real signals (connector audit 2026-09-08: 40 of
+      // 56 alerts were automated senders).
+      if (relType === 'automated' || relType === 'cold_outreach' || relType === 'unknown') continue;
       const isImportant = relType === 'partner' || relType === 'client' || relType === 'advisor';
 
-      // Need meaningful history (5+ mentions) AND the person must be important enough
-      // to warrant a cold relationship alert
-      if (!isImportant && e.mentions < 10) continue;
+      // Unclassified contacts need a real relationship footprint before a
+      // silence is worth an alert.
+      if (!isImportant && (e.mentions < 15 || days <= 21)) continue;
 
       let confidence = 0.5;
       let reasoning = '';
