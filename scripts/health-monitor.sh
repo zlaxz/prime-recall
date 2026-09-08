@@ -91,6 +91,12 @@ else
 fi
 
 # ── 2. Claude auth via proxy ───────────────────────────
+# The proxy now runs ONE claude child at a time; a probe sent mid-agent-run
+# queues behind a 5-15 min session and times out as a false failure. If a
+# claude child is alive, the proxy is self-evidently up and authed — skip.
+if pgrep -f "/opt/homebrew/bin/claude" >/dev/null 2>&1; then
+  log "claude busy with an agent run — skipping auth probe"
+else
 AUTH=$(curl -s --max-time 45 -X POST http://127.0.0.1:3211/claude \
   -H "Content-Type: application/json" \
   -d '{"prompt":"Reply with exactly: OK","timeout":35}' 2>/dev/null)
@@ -118,6 +124,7 @@ else
     ISSUES=$((ISSUES + 1))
   fi
 fi
+fi  # end busy-skip guard
 
 # ── 2b. Agents can actually use MCP tools (hourly) ─────
 if [ "$(date +%M)" -lt 5 ]; then

@@ -1,6 +1,11 @@
 import Foundation
 import Cocoa
 
+// One claude child at a time. Concurrent children racing an OAuth token
+// refresh rotate each other's refresh tokens and de-auth the whole login
+// (observed 2026-08-07 and 2026-09-06). Requests queue; agents are patient.
+let claudeGate = DispatchSemaphore(value: 1)
+
 // ============================================================
 // Claude Proxy — Headless macOS GUI app
 //
@@ -163,6 +168,8 @@ class HTTPServer {
                 Zach says: \(message)
                 """
 
+            claudeGate.wait()
+            defer { claudeGate.signal() }
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
             proc.arguments = args
@@ -247,6 +254,7 @@ class HTTPServer {
 
         // Background mode: spawn claude, respond immediately with 202, don't wait
         if isBackground {
+            claudeGate.wait()
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
             proc.arguments = args
@@ -262,13 +270,17 @@ class HTTPServer {
                 stdinPipe.fileHandleForWriting.write(prompt.data(using: .utf8)!)
                 stdinPipe.fileHandleForWriting.closeFile()
                 print("[claude-proxy] Background agent spawned (pid \(proc.processIdentifier))")
+                DispatchQueue.global().async { proc.waitUntilExit(); claudeGate.signal() }
                 sendResponse(fd, status: 202, body: "{\"status\":\"spawned\",\"pid\":\(proc.processIdentifier)}")
             } catch {
+                claudeGate.signal()
                 sendResponse(fd, status: 500, body: "{\"error\":\"\(error.localizedDescription)\"}")
             }
             return
         }
 
+        claudeGate.wait()
+        defer { claudeGate.signal() }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
         proc.arguments = args
