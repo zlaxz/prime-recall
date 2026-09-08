@@ -251,6 +251,8 @@ if [ -n "$DS_KEY" ]; then
   DS_BAL=$(printf 'header = "Authorization: Bearer %s"\n' "$DS_KEY" | curl -s --max-time 10 -K - https://api.deepseek.com/user/balance 2>/dev/null)
   if echo "$DS_BAL" | grep -q '"is_available":true'; then
     clear_alert "$MSG_DEEPSEEK"
+    BAL_NOW=$(echo "$DS_BAL" | python3 -c "import sys,json;print(json.load(sys.stdin)['balance_infos'][0]['total_balance'])" 2>/dev/null)
+    [ -n "$BAL_NOW" ] && log "deepseek balance: \$$BAL_NOW"
   else
     alert "$MSG_DEEPSEEK"
     ISSUES=$((ISSUES + 1))
