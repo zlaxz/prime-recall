@@ -65,7 +65,7 @@ export async function compileWikiPages(db: Database.Database): Promise<CompileRe
     FROM knowledge WHERE project IS NOT NULL AND project != ''
     AND source_date >= datetime('now', '-30 days')
     GROUP BY project HAVING cnt >= 3
-    ORDER BY last_activity DESC LIMIT 16
+    ORDER BY last_activity DESC LIMIT 8
   `).all() as any[];
   const projects = allProjects.filter(p => !dismissedProjects.includes(p.project));
 

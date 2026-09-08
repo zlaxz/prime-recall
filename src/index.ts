@@ -799,13 +799,7 @@ program
 // ============================================================
 // recall listen — iMessage reply listener for staged action approval
 // ============================================================
-program
-  .command('listen')
-  .description('Start iMessage reply listener for staged action approval (Mac Mini daemon)')
-  .action(async () => {
-    const { startListener } = await import('./imessage-listener.js');
-    await startListener();
-  });
+// 'listen' (iMessage staged-action listener) retired 2026-09-08 — never daemonized, staged actions dead
 
 // OLD re-extract removed — replaced by new version at bottom of file that uses source retrieval APIs
 // ============================================================

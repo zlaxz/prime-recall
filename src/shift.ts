@@ -153,12 +153,7 @@ async function tick() {
         ORDER BY due_date ASC
       `).all() as any[];
 
-      if (urgentCommitments.length > 0) {
-        console.log(`[shift]   ⚠️ ${urgentCommitments.length} commitment(s) due in 24h`);
-        db.prepare(
-          "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('urgent_commitments', ?, datetime('now'))"
-        ).run(JSON.stringify(urgentCommitments));
-      }
+      // commitments tracker retired 2026-09-08 — the ledger owns balls in play
     } catch (e) {}
 
     db.prepare(
@@ -181,34 +176,6 @@ async function tick() {
       "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_full_cycle', ?, datetime('now'))"
     ).run(JSON.stringify(new Date().toISOString()));
 
-    // Promote commitments from knowledge.commitments JSON arrays into the structured
-    // commitments table. Without this, commitment tracking is frozen to whenever
-    // someone last ran \`recall refine\` manually.
-    console.log('[shift]   Extracting commitments (JSON arrays -> structured rows)...');
-    try {
-      const { extractCommitments, updateCommitmentStates } = await import('./ai/commitments.js');
-      const extractResult = await extractCommitments(db, { verbose: false });
-      const stateResult = await updateCommitmentStates(db, { verbose: false });
-      console.log('[shift]   Commitments: ' + extractResult.extracted + ' extracted, ' + extractResult.skipped + ' dedup, states: ' + stateResult.newOverdue + ' overdue, ' + stateResult.newFulfilled + ' fulfilled, ' + stateResult.newDropped + ' dropped');
-    } catch (err: any) {
-      console.log('[shift]   Commitment extraction failed: ' + (err.message || '').slice(0, 80));
-    }
-
-    // Run dream pipeline FIRST (entity profiles, project profiles, commitments)
-    // Intelligence cycle reads these outputs, so they must be fresh
-    console.log('[shift]   Running dream pipeline (project/entity profiles, commitments)...');
-    logMem('pre-dream');
-    try {
-      const { runDreamPipeline } = await import('./dream.js');
-      const dreamResult = await runDreamPipeline({ quick: true }); // SQL tasks only — LLM tasks replaced by wiki agents + PMs
-      const succeeded = dreamResult.tasks.filter((t: any) => t.status === 'success').length;
-      const failed = dreamResult.tasks.filter((t: any) => t.status === 'failed').length;
-      console.log('[shift]   Dream: ' + succeeded + ' succeeded, ' + failed + ' failed (' + dreamResult.total_duration.toFixed(0) + 's)');
-    } catch (err: any) {
-      console.log('[shift]   Dream pipeline failed: ' + (err.message || '').slice(0, 60));
-    }
-    logMem('post-dream');
-
     // Wiki compile + verification: DeepSeek's biggest spenders — once per local
     // day is all the once-daily monitors and brief actually consume.
     const wikiDayNow = new Date().toLocaleDateString('en-CA');
@@ -227,16 +194,6 @@ async function tick() {
     }
     logMem('post-wiki-compile');
 
-    // NEW: Verification layer — audit wiki claims against actual sources
-    console.log("[shift]   Verifying wiki claims (DeepSeek audit)...");
-    try {
-      const { verifyWikiPages } = await import("./verification.js");
-      const verResult = await verifyWikiPages(db, { maxPages: 3, claimsPerPage: 3 });
-      const rate = verResult.totalClaims > 0 ? Math.round((verResult.verified / verResult.totalClaims) * 100) : 0;
-      console.log("[shift]   Verification: " + verResult.verified + "/" + verResult.totalClaims + " verified (" + rate + "%), " + verResult.incorrect + " flagged (" + (verResult.durationMs / 1000).toFixed(0) + "s)");
-    } catch (err: any) {
-      console.log("[shift]   Verification failed: " + (err.message || "").slice(0, 60));
-    }
     db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_wiki_day', ?, datetime('now'))").run(wikiDayNow);
     }
     logMem('post-verification');

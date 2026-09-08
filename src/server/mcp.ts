@@ -18,7 +18,6 @@ import { extractIntelligence } from '../ai/extract.js';
 import { askWithSources } from '../ai/ask.js';
 import { generateBriefing } from '../ai/briefing.js';
 import { v4 as uuid } from 'uuid';
-import { executeAction } from '../actions.js';
 
 const MCP_SERVER_CONFIG = {
   name: "prime-recall",
@@ -1236,65 +1235,7 @@ srv.tool(
   }
 );
 
-// ── Staged Actions: The bridge from intelligence to execution ────
-
-srv.tool(
-  "prime_staged_actions",
-  "List pending prepared actions from the dream pipeline. These are ready-to-execute actions (draft emails, calendar blocks) that the user can approve with one click.",
-  {},
-  async () => {
-    try {
-      const db = getDb();
-      const actions = db.prepare(
-        "SELECT id, type, summary, reasoning, project, created_at FROM staged_actions WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > datetime('now')) ORDER BY id ASC"
-      ).all() as any[];
-
-      if (actions.length === 0) {
-        return { content: [{ type: "text" as const, text: "No pending actions. Run the dream pipeline to generate recommendations." }] };
-      }
-
-      const lines = actions.map((a: any, i: number) =>
-        `${i + 1}. [${a.type.toUpperCase()}] ${a.summary}\n   Why: ${a.reasoning || 'N/A'}\n   Project: ${a.project || 'general'}\n   ID: ${a.id}`
-      ).join('\n\n');
-
-      return { content: [{ type: "text" as const, text: `📋 PENDING ACTIONS (${actions.length}):\n\n${lines}\n\nApprove with: prime_approve_action({id: N})` }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `✗ Error: ${err.message}` }] };
-    }
-  }
-);
-
-srv.tool(
-  "prime_approve_action",
-  "Approve and execute a staged action. The system sends the email, creates the calendar event, or executes the prepared action.",
-  {
-    id: z.number().describe("The staged action ID to approve"),
-  },
-  async ({ id }) => {
-    const db = getDb();
-    const result = await executeAction(db, id);
-    const prefix = result.success ? '✓' : '✗';
-    return { content: [{ type: "text" as const, text: `${prefix} ${result.message}` }] };
-  }
-);
-
-srv.tool(
-  "prime_reject_action",
-  "Reject a staged action. Records the rejection for the feedback loop — the system learns not to recommend similar actions.",
-  {
-    id: z.number().describe("The staged action ID to reject"),
-    reason: z.string().optional().describe("Why rejected (helps the system learn)"),
-  },
-  async ({ id, reason }) => {
-    try {
-      const db = getDb();
-      db.prepare("UPDATE staged_actions SET status = 'rejected', acted_at = datetime('now') WHERE id = ? AND status = 'pending'").run(id);
-      return { content: [{ type: "text" as const, text: `✓ Action ${id} rejected.${reason ? ' Reason: ' + reason : ''} The system will learn from this.` }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `✗ Error: ${err.message}` }] };
-    }
-  }
-);
+// (staged-actions tools retired 2026-09-08 — dead since April; ledger+proposals replaced them)
 
 // ── Sampling-powered investigation (uses Claude Desktop's own LLM) ────
 

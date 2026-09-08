@@ -10,14 +10,12 @@ import { extractIntelligence } from '../ai/extract.js';
 import { askWithSources } from '../ai/ask.js';
 import { v4 as uuid } from 'uuid';
 import { processOtterMeeting } from '../connectors/otter.js';
-import { startScheduler } from '../scheduler.js';
 import { registerPrimeTools, MCP_SERVER_CONFIG } from './mcp.js';
 import { isValidBearer as oauthValidBearer } from './oauth.js';
 
 // Secret MCP path: set PRIME_MCP_PATH=/mcp-<random> in .env; old /mcp then falls under API-key auth
 const MCP_PATH = process.env.PRIME_MCP_PATH || '/mcp';
 import { getAmbientDisplayHTML } from './ambient-display.js';
-import { mutateSoulFromCorrection } from '../soul-mutation.js';
 
 export async function startServer(port: number = 3210, options: { sync?: boolean; syncInterval?: number } = {}) {
   const app = express();
@@ -982,18 +980,6 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     }
   });
 
-  // ── Action approval (for ambient display + API clients) ──
-  app.post('/api/approve-action', async (req, res) => {
-    try {
-      const { id } = req.body;
-      if (!id) return res.status(400).json({ error: 'id required' });
-      const { executeAction } = await import('../actions.js');
-      const result = await executeAction(db, id);
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
 
   // ── Dismiss action with feedback → creates correction rule ──
   app.post('/api/dismiss-action', async (req, res) => {
@@ -1788,13 +1774,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
 
       if (cmd.startsWith('approve ')) {
         const id = text.replace(/^approve\s+/i, '').trim();
-        try {
-          const { executeAction } = await import('../actions.js');
-          const result = await executeAction(db, id);
-          res.json({ intent: 'approve', result });
-        } catch (err: any) {
-          res.json({ intent: 'approve', error: err.message });
-        }
+        res.json({ intent: 'approve', error: 'staged actions retired 2026-09-08 — use the ledger/proposals flow' });
+        void id;
         return;
       }
 
@@ -2314,10 +2295,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     }
 
 
-    // Mutate SOUL.md files based on the correction (async, non-blocking)
-    mutateSoulFromCorrection(db, { claim, correction, project }).catch(err =>
-      console.error("[soul-mutation] Failed:", err.message)
-    );
+    // soul-mutation retired 2026-09-08
 
     res.json({ success: true, id });
   });
@@ -2730,8 +2708,6 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     console.log('    POST /api/stripe/webhook — Stripe webhook');
     console.log('    POST /api/v1/auth/key    — API key validation\n');
 
-    if (options.sync !== false) {
-      startScheduler(options.syncInterval || 15);
-    }
+    // scheduler retired 2026-09-08 — shift owns sync; serve always runs --no-sync
   });
 }

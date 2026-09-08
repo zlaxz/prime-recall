@@ -10,7 +10,6 @@ import { buildEntityGraph, computeRelationshipMomentum } from './entities.js';
 import { retrieveDeepContext, retrieveGmailThread } from './source-retrieval.js';
 import { notify } from './notify.js';
 import { generateBriefingDoc } from './briefing-doc.js';
-import { autoExecuteLowRisk } from './actions.js';
 import { task15PredictionVerification, task16StrategicReflection, getCorrectionRules } from './intelligence-loop.js';
 import { task17ThreadBuilder, getThreadContext } from './narrative-threads.js';
 import { runIntelligenceCycle } from './intelligence-cycle.js';
@@ -3774,19 +3773,7 @@ export async function runDreamPipeline(
     console.error(`  ✗ COS brief failed: ${err.message?.slice(0, 100)}`);
   }
 
-  // ── Auto-execute low-risk actions (reminders, calendar blocks) ──
-  try {
-    const autoResults = await autoExecuteLowRisk(db);
-    if (autoResults.length > 0) {
-      const succeeded = autoResults.filter(r => r.success).length;
-      console.log(`  ✓ Auto-executed ${succeeded}/${autoResults.length} low-risk actions (reminders, calendar)`);
-      for (const r of autoResults) {
-        console.log(`    ${r.success ? '✓' : '✗'} ${r.message}`);
-      }
-    }
-  } catch (err: any) {
-    console.error(`  ✗ Auto-execute failed: ${err.message?.slice(0, 100)}`);
-  }
+  // auto-execute retired 2026-09-08 with staged actions
 
   // ── iMessage notifications DISABLED — use COS instead ──
   console.log('  ○ iMessage notifications disabled (use COS for action review)');
