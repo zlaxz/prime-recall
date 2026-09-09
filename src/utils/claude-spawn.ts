@@ -167,9 +167,17 @@ async function runClaudeViaProxy(prompt: string, options: {
 }
 
 /**
- * For large prompts (>64KB), write to a temp file and use curl
- * to send to the proxy. Curl handles chunked encoding correctly
- * with the Swift proxy's body reader.
+ * The single transport for EVERY proxy call, at any size — not a large-prompt
+ * special case. The `> 60000` byte guard this used to document was deleted in
+ * bb3705c when curl became the only path; the sole caller (runClaudeViaProxy
+ * above) has called it unconditionally ever since. Reading this comment as
+ * ">64KB only" is what made the blast radius of the world-readable temp-file
+ * bug fixed in 5736ce1 look ~100x smaller than it actually was.
+ *
+ * The body goes via a temp file rather than a `-d <json>` argv value because
+ * argv is readable by any local process through `ps ww`, and these bodies are
+ * full agent prompts (mail, deals, contacts); a big one would also exceed
+ * ARG_MAX (1MB here).
  */
 async function runClaudeViaProxyCurl(jsonBody: string, timeoutSec: number): Promise<string> {
   const { writeFileSync, unlinkSync, mkdtempSync, rmdirSync } = await import('fs');
