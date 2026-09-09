@@ -31,6 +31,35 @@ func remainingBudget(_ timeout: Int, since start: DispatchTime) -> Int {
     return max(timeout - queued, 1)
 }
 
+// Feed a child's stdin off the handler thread. The pipe buffer is 64KB and agent
+// prompts are larger, so the write only finishes as fast as claude drains it —
+// and it runs BEFORE the deadline watchdog is armed, so a child that stalls
+// without reading holds claudeGate with no timeout at all (reproduced
+// 2026-09-09: write() still blocked after 20s against a live, non-draining
+// child). FileHandle.write is doubly wrong here: when the child instead exits
+// mid-write it turns EPIPE into NSFileHandleOperationException, an ObjC
+// exception Swift cannot catch, which aborts this whole process and every agent
+// with it — the SIGPIPE fix above does not help, because Foundation raises
+// rather than signals. Raw write() has neither problem: a dead reader is just
+// -1/EPIPE, and the handler is free to reach its own timeout and terminate().
+func feedStdin(_ pipe: Pipe, _ text: String) {
+    let bytes = Array(text.utf8)
+    DispatchQueue.global().async {
+        let fd = pipe.fileHandleForWriting.fileDescriptor
+        bytes.withUnsafeBufferPointer { buf in
+            var sent = 0
+            while sent < bytes.count {
+                let n = write(fd, buf.baseAddress! + sent, bytes.count - sent)
+                if n <= 0 { break }  // EPIPE — child is gone; the run reports it
+                sent += n
+            }
+        }
+        // close() (not close(fd)) so the FileHandle records the close and its
+        // dealloc cannot shut a descriptor number some later client now owns.
+        try? pipe.fileHandleForWriting.close()
+    }
+}
+
 // ============================================================
 // Claude Proxy — Headless macOS GUI app
 //
@@ -214,8 +243,7 @@ class HTTPServer {
 
             do {
                 try proc.run()
-                stdinPipe.fileHandleForWriting.write(primePrompt.data(using: .utf8)!)
-                stdinPipe.fileHandleForWriting.closeFile()
+                feedStdin(stdinPipe, primePrompt)
 
                 let deadline = DispatchTime.now() + .seconds(runTimeout)
                 let sem = DispatchSemaphore(value: 0)
@@ -300,8 +328,7 @@ class HTTPServer {
 
             do {
                 try proc.run()
-                stdinPipe.fileHandleForWriting.write(prompt.data(using: .utf8)!)
-                stdinPipe.fileHandleForWriting.closeFile()
+                feedStdin(stdinPipe, prompt)
                 print("[claude-proxy] Background agent spawned (pid \(proc.processIdentifier))")
                 DispatchQueue.global().async { proc.waitUntilExit(); claudeGate.signal() }
                 sendResponse(fd, status: 202, body: "{\"status\":\"spawned\",\"pid\":\(proc.processIdentifier)}")
@@ -333,8 +360,7 @@ class HTTPServer {
 
         do {
             try proc.run()
-            stdinPipe.fileHandleForWriting.write(prompt.data(using: .utf8)!)
-            stdinPipe.fileHandleForWriting.closeFile()
+            feedStdin(stdinPipe, prompt)
 
             // Wait with timeout
             let deadline = DispatchTime.now() + .seconds(runTimeout)
