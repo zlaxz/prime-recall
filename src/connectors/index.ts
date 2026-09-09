@@ -184,8 +184,8 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
       if (member.sync_gmail) {
         try {
           const { items } = await scanGmail(db, {
-            days: 400,
-            maxThreads: 500,
+            days: 14,
+            maxThreads: 100,
             sourceAccount: member.email,
             useServiceAccount: true,
           });

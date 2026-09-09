@@ -393,8 +393,10 @@ export async function scanGmail(
   }
   console.log(`  Extracting intelligence (${CONCURRENCY} concurrent)...`);
   let extracted = 0;
+  let scanDegraded = false; // first 402 stops all further paid calls this scan
 
   async function processThread(td: typeof threadData[0]) {
+    if (scanDegraded) return false;
     try {
       // Use V2 provenance extraction, fall back to V1
       let extV2;
@@ -478,7 +480,13 @@ export async function scanGmail(
         process.stdout.write(`\r  Extracted: ${extracted}/${threadData.length}`);
       }
       return true;
-    } catch (err: any) { console.error(`    thread ${td.id} FAILED: ${err.message}`); return false; }
+    } catch (err: any) {
+      if (/402|Insufficient Balance/i.test(String(err?.message))) {
+        if (!scanDegraded) console.error('    402 — balance dead; degrading scan (no further paid calls this tick)');
+        scanDegraded = true;
+      } else console.error(`    thread ${td.id} FAILED: ${err.message}`);
+      return false;
+    }
   }
 
   // Run with concurrency limiter

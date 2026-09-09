@@ -187,6 +187,15 @@ export async function getDefaultProvider(apiKey?: string): Promise<LLMProvider> 
  * Falls back to Claude if DEEPSEEK_API_KEY not set.
  */
 export async function getBulkProvider(apiKey?: string, db?: any): Promise<LLMProvider> {
+  // Watchdog sets this when the balance drains faster than any legitimate
+  // workload can explain — every paid bulk call then fails fast and free.
+  try {
+    const Database = (await import('better-sqlite3')).default;
+    const kdb = new Database('/Users/zachstock/.prime/prime.db', { readonly: true });
+    const ks = kdb.prepare("SELECT value FROM graph_state WHERE key='llm_kill_switch'").get() as any;
+    kdb.close();
+    if (ks && ks.value === '1') throw new Error('LLM kill switch active (runaway burn detected) — clear graph_state.llm_kill_switch to resume');
+  } catch (e: any) { if (String(e?.message).includes('kill switch')) throw e; }
   if (_deepseekProvider) return _deepseekProvider;
 
   // 1. Env var (preferred — set by launchd plist or shell)

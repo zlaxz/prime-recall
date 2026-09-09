@@ -65,6 +65,7 @@ MSG_BRIEF="Intelligence brief is stale and auto-regen failed."
 MSG_DB="Database integrity check failed."
 MSG_DISK="Low disk space on Mac Mini."
 MSG_DEEPSEEK="DeepSeek API balance depleted — wiki compilation and claim verification fail every 4h cycle. Top up at platform.deepseek.com."
+MSG_BURN="DeepSeek burning faster than any legitimate workload — LLM kill switch ENGAGED. Investigate llm-usage.log, then clear graph_state.llm_kill_switch to resume."
 MSG_MONITORS="pm_agents roster is missing or has zero active monitors — all PM agents dark."
 
 # ── 0. Manual self-test ────────────────────────────────
@@ -253,6 +254,18 @@ if [ -n "$DS_KEY" ]; then
     clear_alert "$MSG_DEEPSEEK"
     BAL_NOW=$(echo "$DS_BAL" | python3 -c "import sys,json;print(json.load(sys.stdin)['balance_infos'][0]['total_balance'])" 2>/dev/null)
     [ -n "$BAL_NOW" ] && log "deepseek balance: \$$BAL_NOW"
+    # Burn-rate breaker: >$0.50 drop per 5-min sample, 3 consecutive => runaway
+    STATE="$HOME/.prime/burn-state"
+    PREV=$(cat "$STATE" 2>/dev/null | head -1); STREAK=$(cat "$STATE" 2>/dev/null | sed -n 2p)
+    if [ -n "$BAL_NOW" ] && [ -n "$PREV" ]; then
+      DROP=$(python3 -c "print(1 if (float('$PREV') - float('$BAL_NOW')) > 0.50 else 0)" 2>/dev/null)
+      if [ "$DROP" = "1" ]; then STREAK=$((${STREAK:-0} + 1)); else STREAK=0; fi
+      if [ "$STREAK" -ge 3 ]; then
+        sqlite3 "$DB" "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('llm_kill_switch','1',datetime('now'))" 2>/dev/null
+        alert "$MSG_BURN"
+      fi
+    fi
+    printf '%s\n%s\n' "$BAL_NOW" "${STREAK:-0}" > "$STATE"
   else
     alert "$MSG_DEEPSEEK"
     ISSUES=$((ISSUES + 1))

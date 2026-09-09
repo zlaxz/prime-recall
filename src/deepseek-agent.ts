@@ -32,6 +32,7 @@ export interface AgentResult {
   sourceRefsRead: string[];
 }
 
+// label: set by callers so llm-usage.log names the consumer
 const DEFAULT_OPTIONS: Required<AgentOptions> = {
   // Bulk work runs on chat — reasoner burned ~$50/day compiling wikis (2026-09-07).
   // Callers that truly need reasoning pass model explicitly.
@@ -262,6 +263,7 @@ async function executeTool(db: Database.Database, name: string, args: any): Prom
 // ── The Agent Class ──
 
 export class DeepSeekAgent {
+  label?: string;
   private db: Database.Database;
   private client: OpenAI;
   private options: Required<AgentOptions>;
@@ -296,6 +298,12 @@ export class DeepSeekAgent {
         temperature: this.options.temperature,
         max_tokens: this.options.maxTokens,
       });
+
+      try {
+        const u: any = (response as any).usage || {};
+        const line = [new Date().toISOString(), this.options.model, u.prompt_tokens ?? 0, u.completion_tokens ?? 0, u.prompt_cache_hit_tokens ?? 0, 'deepseek-agent:' + (this.label || 'unlabeled')].join('\t') + '\n';
+        (await import('fs')).appendFileSync('/Users/zachstock/.prime/logs/llm-usage.log', line);
+      } catch (_e) {}
 
       const msg = response.choices[0].message;
       messages.push(msg);
