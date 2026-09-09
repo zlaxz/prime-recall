@@ -2702,7 +2702,10 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     console.log('    POST /api/remember  — Quick capture');
     console.log('    GET  /api/status    — Knowledge base stats');
     console.log('    GET  /api/query/*   — Structured queries');
-    console.log('    ALL  /mcp           — MCP over HTTP (for remote Claude Desktop)');
+    // Not '/mcp': the endpoint lives at the secret PRIME_MCP_PATH (mcp-http.ts), and bare
+    // /mcp is left to 404/401 on purpose. Print the real (truncated) path so this banner
+    // can't send the next reader testing a path that is supposed to be dead.
+    console.log(`    ALL  ${MCP_PATH.slice(0, 8)}${MCP_PATH.length > 8 ? '…' : ''}      — MCP over HTTP (for remote Claude Desktop)`);
     console.log('    POST /api/webhooks/otter — Otter.ai webhook');
     console.log('    POST /api/simulate   — Simulation Room (practice conversations)');
     console.log('    POST /api/stripe/webhook — Stripe webhook');
