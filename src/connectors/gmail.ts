@@ -161,7 +161,7 @@ export async function scanGmail(
   const afterEpoch = Math.floor(afterDate.getTime() / 1000);
 
   // Fetch threads with pagination to capture everything in the date range
-  const query = `after:${afterEpoch} -category:promotions -category:social -category:updates -category:forums -from:noreply -from:no-reply -from:notifications -from:mailer -from:newsletter -from:digest -from:marketing -from:support -from:donotreply -from:info@`;
+  const query = `after:${afterEpoch} -category:promotions -category:social -category:updates -category:forums -from:noreply -from:no-reply -from:notifications -from:mailer -from:newsletter -from:digest -from:marketing -from:support -from:donotreply -from:info@ -from:quinn@recaptureinsurance.com -from:prime@recaptureinsurance.com`;
   const threads: { id: string; historyId?: string }[] = [];
   let pageToken: string | undefined;
 
