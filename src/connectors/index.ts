@@ -23,8 +23,10 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
   if (saConfig) {
     try {
       const { items } = await scanGmail(db, {
-        days: 400,
-        maxThreads: 500,
+        // 400d/500-thread window re-fed every failed/noise thread to the
+        // extractor every 15 minutes — the $86/day DeepSeek burn (2026-09-08).
+        days: 14,
+        maxThreads: 150,
         sourceAccount: gmailEmail as string,
         useServiceAccount: true,
       });

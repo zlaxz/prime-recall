@@ -384,6 +384,13 @@ export async function scanGmail(
   }
 
   // Phase 2: AI extraction in parallel (Claude Code CLI calls)
+  // Hard per-scan AI budget: whatever upstream filtering misses, one scan may
+  // never hand the extractor an unbounded queue again.
+  const MAX_AI_EXTRACTIONS_PER_SCAN = 40;
+  if (threadData.length > MAX_AI_EXTRACTIONS_PER_SCAN) {
+    console.log(`  Extraction budget: ${threadData.length} candidates capped at ${MAX_AI_EXTRACTIONS_PER_SCAN} (rest next tick)`);
+    threadData.length = MAX_AI_EXTRACTIONS_PER_SCAN;
+  }
   console.log(`  Extracting intelligence (${CONCURRENCY} concurrent)...`);
   let extracted = 0;
 
@@ -405,15 +412,17 @@ export async function scanGmail(
       // Checked before embedding so noise doesn't cost an embedding call too.
       if (ext.tags?.includes('noise') || ext.title === '[NOISE]') {
         console.log(`    ai-noise: "${td.subject.slice(0, 50)}"`);
-        db.prepare(
-          'INSERT OR REPLACE INTO gmail_noise_threads (thread_id, source_account, message_count, subject, last_date) VALUES (?, ?, ?, ?, ?)'
-        ).run(
-          td.id,
-          options.sourceAccount || userEmail,
-          td.messageCount,
-          td.subject,
-          td.lastDate ? new Date(td.lastDate).toISOString() : null,
-        );
+        // This insert failing silently meant noise threads were re-extracted
+        // every tick forever (gmail_noise_threads had ZERO rows on 2026-09-08).
+        try {
+          let lastIso: string | null = null;
+          try { lastIso = td.lastDate ? new Date(td.lastDate).toISOString() : null; } catch (_e) {}
+          db.prepare(
+            'INSERT OR REPLACE INTO gmail_noise_threads (thread_id, source_account, message_count, subject, last_date) VALUES (?, ?, ?, ?, ?)'
+          ).run(td.id, options.sourceAccount || userEmail, td.messageCount ?? 0, td.subject ?? '', lastIso);
+        } catch (markErr: any) {
+          console.error(`    noise-mark FAILED for ${td.id}: ${String(markErr?.message || markErr).slice(0, 120)}`);
+        }
         return;
       }
 
