@@ -67,6 +67,7 @@ MSG_DISK="Low disk space on Mac Mini."
 MSG_DEEPSEEK="DeepSeek API balance depleted — wiki compilation and claim verification fail every 4h cycle. Top up at platform.deepseek.com."
 MSG_BURN="DeepSeek burning faster than any legitimate workload — LLM kill switch ENGAGED. Investigate llm-usage.log, then clear graph_state.llm_kill_switch to resume."
 MSG_MONITORS="pm_agents roster is missing or has zero active monitors — all PM agents dark."
+MSG_STALEENV="A daemon is pinned to a stale secret in its LOADED launchd job definition — the value was removed from the .plist file but kickstart never re-reads it. Only a reboot (or bootout+bootstrap) clears it. health-monitor.log names the job and the variable."
 
 # ── 0. Manual self-test ────────────────────────────────
 if [ -f "$HOME/.prime/health-selftest" ]; then
@@ -281,6 +282,46 @@ else
   ISSUES=$((ISSUES + 1))
 fi
 
+# ── 7d. Stale launchd job environment ──────────────────
+# A secret deleted from a .plist survives in the LOADED job definition:
+# `kickstart -k` respawns the process but never re-reads the file, so a
+# daemon can stay pinned to a rotated/revoked value indefinitely while the
+# file on disk looks clean. Bit serve and tunnel (DEEPSEEK_API_KEY, both
+# 2026-09-09); the mechanism is generic to any variable.
+# Rule: a var in the loaded `environment` block that the plist does not set
+# is stale unless its value still agrees with .env. Values are compared in
+# shell vars and only ever logged as a 4-char tail — never in full, never in argv.
+STALE_ENV=0
+for LBL in $(launchctl list | awk '$3 ~ /^com\.prime/ {print $3}'); do
+  PRINT=$(launchctl print "gui/$UID_Z/$LBL" 2>/dev/null)
+  [ -n "$PRINT" ] || continue
+  PLIST=$(echo "$PRINT" | awk -F' = ' '/^[[:space:]]+path = /{print $2; exit}')
+  PLIST_KEYS=""
+  if [ -n "$PLIST" ] && [ -f "$PLIST" ]; then
+    PLIST_KEYS=$(plutil -extract EnvironmentVariables json -o - "$PLIST" 2>/dev/null \
+      | python3 -c "import sys,json;print(' '.join(json.load(sys.stdin)))" 2>/dev/null)
+  fi
+  while IFS= read -r LINE; do
+    VAR="${LINE%% => *}"; VAL="${LINE#* => }"
+    # XPC_SERVICE_NAME is injected by launchd itself; plist-set vars are legitimate.
+    case " XPC_SERVICE_NAME $PLIST_KEYS " in *" $VAR "*) continue;; esac
+    ENVVAL=$(grep "^${VAR}=" "$PRIME_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+    if [ -n "$ENVVAL" ] && [ "$ENVVAL" = "$VAL" ]; then
+      log "launchd env: $LBL sets $VAR outside its plist but the value still matches .env — harmless"
+    else
+      STALE_ENV=1
+      log "launchd env: $LBL is pinned to $VAR (...${VAL: -4}) — not in its plist, disagrees with .env"
+    fi
+  done < <(echo "$PRINT" | sed -n '/^[[:space:]]*environment = {/,/^[[:space:]]*}/p' \
+            | sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\) => \(.*\)$/\1 => \2/p')
+done
+if [ "$STALE_ENV" -eq 1 ]; then
+  alert "$MSG_STALEENV"
+  ISSUES=$((ISSUES + 1))
+else
+  clear_alert "$MSG_STALEENV"
+fi
+
 # ── 8. Tunnel (best-effort restart, no alert) ──────────
 if ! pgrep -f "cloudflared" >/dev/null 2>&1; then
   log "tunnel down — restarting"; restart_daemon "com.prime-recall.tunnel"
@@ -302,6 +343,9 @@ if [ -x "$MECH" ]; then
     # Brief-timing alerts are watchdog-only — a mechanic session cannot fix
     # "the cycle is slow" and would poke the system mid-cycle (audit finding)
     grep -q "Morning brief did not go out" "$f" 2>/dev/null && continue
+    # Stale launchd env needs bootout+bootstrap or a reboot — outside the
+    # mechanic's walls, and the alert already carries the fix for Zach.
+    grep -q "LOADED launchd job definition" "$f" 2>/dev/null && continue
     AGE=$(( NOW - $(stat -f %m "$f") ))
     [ "$AGE" -ge 900 ] || continue
     if [ -f "$f.dispatched" ] && [ $(( NOW - $(stat -f %m "$f.dispatched") )) -lt 21600 ]; then continue; fi
