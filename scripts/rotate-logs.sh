@@ -11,8 +11,15 @@ for logfile in "$LOG_DIR"/*.log; do
         for i in 4 3 2 1; do
             [ -f "${logfile}.$i" ] && mv "${logfile}.$i" "${logfile}.$((i+1))"
         done
-        mv "$logfile" "${logfile}.1"
-        > "$logfile"  # Create fresh empty log
+        # Copy-then-truncate, NOT mv: launchd holds an O_APPEND fd on each
+        # daemon's StandardOut/ErrorPath and never reopens it. Renaming the
+        # file leaves that fd on the renamed inode, so the daemon keeps
+        # appending to the .log.1 archive (unbounded) while the fresh .log
+        # stays empty until the daemon happens to restart. Truncating in
+        # place keeps the inode, so the live fd keeps working.
+        # Tradeoff: writes landing between the cp and the truncate are lost.
+        cp "$logfile" "${logfile}.1"
+        > "$logfile"  # Truncate in place — keeps the inode the daemons hold
         echo "[rotate] $(date): Rotated $(basename $logfile) ($size bytes)"
     fi
 done
