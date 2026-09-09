@@ -315,13 +315,36 @@ export async function scanGmail(
     console.log(`  Updated ${updatedThreads} threads with new replies`);
   }
 
+  // Threads the AI classified as noise produce no knowledge row, so the dedup
+  // below could never skip them — they were re-extracted every single tick.
+  // Record them here instead, keyed on message_count so a genuine reply reopens
+  // the thread for extraction.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gmail_noise_threads (
+      thread_id TEXT NOT NULL,
+      source_account TEXT NOT NULL,
+      message_count INTEGER,
+      subject TEXT,
+      last_date TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (thread_id, source_account)
+    );
+  `);
+
   // Dedup: skip threads already in the knowledge base
   const beforeDedup = threadData.length;
+  let skippedNoise = 0;
   const deduped = threadData.filter(td => {
     const sourceAccount = options.sourceAccount || userEmail;
       const existing = db.prepare('SELECT id FROM knowledge WHERE source_ref = ? AND (source_account = ? OR source_account IS NULL)').get(`thread:${td.id}`, sourceAccount);
-    return !existing;
+    if (existing) return false;
+    const known = db.prepare('SELECT message_count FROM gmail_noise_threads WHERE thread_id = ? AND source_account = ?').get(td.id, sourceAccount) as { message_count: number } | undefined;
+    if (known && known.message_count >= td.messageCount) { skippedNoise++; return false; }
+    return true;
   });
+  if (skippedNoise > 0) {
+    console.log(`  Skipping ${skippedNoise} known-noise threads (no new messages)`);
+  }
   if (beforeDedup - deduped.length > 0) {
     console.log(`  Skipping ${beforeDedup - deduped.length} already indexed threads`);
   }
@@ -374,17 +397,28 @@ export async function scanGmail(
         extV2 = null;
       }
       const ext = extV2 ? toV1(extV2) : await extractIntelligence(td.content, apiKey);
-      const embText = `${ext.title}\n${ext.summary}`;
-      const embedding = await generateEmbedding(embText, apiKey);
 
       const lastFromIsUser = isSelfSender(td.lastFrom);
       const daysSinceLastMessage = Math.floor((Date.now() - new Date(td.lastDate).getTime()) / 86400000);
 
       // Skip noise items (extraction identified as automated/marketing)
+      // Checked before embedding so noise doesn't cost an embedding call too.
       if (ext.tags?.includes('noise') || ext.title === '[NOISE]') {
         console.log(`    ai-noise: "${td.subject.slice(0, 50)}"`);
+        db.prepare(
+          'INSERT OR REPLACE INTO gmail_noise_threads (thread_id, source_account, message_count, subject, last_date) VALUES (?, ?, ?, ?, ?)'
+        ).run(
+          td.id,
+          options.sourceAccount || userEmail,
+          td.messageCount,
+          td.subject,
+          td.lastDate ? new Date(td.lastDate).toISOString() : null,
+        );
         return;
       }
+
+      const embText = `${ext.title}\n${ext.summary}`;
+      const embedding = await generateEmbedding(embText, apiKey);
 
       let importance = ext.importance;
       if (!lastFromIsUser && daysSinceLastMessage > 7) {

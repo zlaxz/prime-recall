@@ -1,9 +1,9 @@
 import OpenAI from 'openai';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, unlinkSync } from 'fs';
+import { writeFileSync, unlinkSync, appendFileSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 import { spawnClaude, buildClaudeEnv } from '../utils/claude-spawn.js';
 
 const execFileAsync = promisify(execFile);
@@ -102,6 +102,28 @@ function createClaudeCodeProvider(): LLMProvider {
 }
 
 /**
+ * Append one line per paid LLM call to ~/.prime/logs/llm-usage.log so runaway
+ * spend can be attributed to a caller instead of inferred from the balance curve.
+ * Caller is taken from the stack — the burner shows up as the dominant frame.
+ */
+function logLLMUsage(model: string, usage: any) {
+  try {
+    const frames = (new Error().stack || '').split('\n').slice(3, 9)
+      .map(l => (l.match(/at (?:async )?([\w.<>]+)/) || [])[1])
+      .filter((f): f is string => !!f && !['chat', 'logLLMUsage'].includes(f));
+    const caller = frames.slice(0, 3).join('<') || 'unknown';
+    const line = [
+      new Date().toISOString(), model,
+      usage?.prompt_tokens ?? -1,
+      usage?.completion_tokens ?? -1,
+      usage?.prompt_cache_hit_tokens ?? -1,
+      caller,
+    ].join('\t') + '\n';
+    appendFileSync(join(homedir(), '.prime', 'logs', 'llm-usage.log'), line);
+  } catch (_e) {}
+}
+
+/**
  * OpenAI-compatible API provider — works with OpenAI, DeepSeek, OpenRouter.
  * Used as fallback for users without Claude Max, or for embeddings.
  */
@@ -117,6 +139,7 @@ function createAPIProvider(config: { model: string; apiKey: string; baseUrl?: st
         max_tokens: options.max_tokens ?? 2000,
         ...(options.json ? { response_format: { type: 'json_object' as const } } : {}),
       });
+      logLLMUsage(config.model, response.usage);
       return response.choices[0]?.message?.content || '';
     }
   };
