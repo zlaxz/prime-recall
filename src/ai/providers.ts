@@ -161,7 +161,7 @@ let _deepseekProviderKey: string | undefined = undefined;
  * file and the snapshot disagree, the file is the newer truth: adopt it and
  * write it back to process.env so the other direct readers converge too.
  */
-function resolveDeepseekKey(): string | undefined {
+export function resolveDeepseekKey(): string | undefined {
   let fileKey: string | undefined;
   try {
     const envPath = '/Users/zachstock/GitHub/prime/.env';
@@ -196,8 +196,9 @@ export async function getDefaultProvider(apiKey?: string): Promise<LLMProvider> 
   } catch (_e) {}
 
   // Fall back to DeepSeek via OpenRouter or direct
-  if (process.env.DEEPSEEK_API_KEY) {
-    _claudeProvider = createAPIProvider({ model: 'deepseek-chat', apiKey: process.env.DEEPSEEK_API_KEY, baseUrl: 'https://api.deepseek.com' });
+  const deepseekKey = resolveDeepseekKey();
+  if (deepseekKey) {
+    _claudeProvider = createAPIProvider({ model: 'deepseek-chat', apiKey: deepseekKey, baseUrl: 'https://api.deepseek.com' });
     return _claudeProvider;
   }
   if (process.env.OPENROUTER_API_KEY) {

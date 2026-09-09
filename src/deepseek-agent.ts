@@ -3,6 +3,7 @@ import { join } from "path";
 import type Database from 'better-sqlite3';
 import { OpenAI } from 'openai';
 import { getConfig } from './db.js';
+import { resolveDeepseekKey } from './ai/providers.js';
 
 // ============================================================
 // DeepSeek Tool-Calling Agent
@@ -272,7 +273,7 @@ export class DeepSeekAgent {
     this.db = db;
     this.options = { ...DEFAULT_OPTIONS, ...options };
 
-    const apiKey = process.env.DEEPSEEK_API_KEY || getConfig(db, 'deepseek_api_key');
+    const apiKey = resolveDeepseekKey() || getConfig(db, 'deepseek_api_key');
     if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
 
     this.client = new OpenAI({

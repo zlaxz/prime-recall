@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { getConfig } from './db.js';
+import { resolveDeepseekKey } from './ai/providers.js';
 
 // ============================================================
 // SOUL.md Mutation Pipeline
@@ -209,7 +210,7 @@ export async function mutateSoulFromCorrection(
   db: Database.Database,
   correction: Correction
 ): Promise<MutationResult[]> {
-  const apiKey = process.env.DEEPSEEK_API_KEY || getConfig(db, 'deepseek_api_key');
+  const apiKey = resolveDeepseekKey() || getConfig(db, 'deepseek_api_key');
   if (!apiKey) {
     console.warn('[soul-mutation] No DEEPSEEK_API_KEY -- skipping SOUL mutation');
     return [];
