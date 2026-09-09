@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, unlinkSync, appendFileSync } from 'fs';
+import { writeFileSync, unlinkSync, appendFileSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
 import { spawnClaude, buildClaudeEnv } from '../utils/claude-spawn.js';
@@ -148,6 +148,35 @@ function createAPIProvider(config: { model: string; apiKey: string; baseUrl?: st
 // Cached provider instances
 let _claudeProvider: LLMProvider | null = null;
 let _deepseekProvider: LLMProvider | null = null;
+let _deepseekProviderKey: string | undefined = undefined;
+
+/**
+ * Resolve the DeepSeek key, preferring the .env file on disk over a stale
+ * process.env snapshot.
+ *
+ * Every daemon does `import 'dotenv/config'` at boot, so process.env is a
+ * point-in-time copy of .env — it does NOT track a later key rotation. A
+ * long-lived process (serve runs for days) then keeps using a revoked key and
+ * 401s forever while every short-lived caller reads the good key. So when the
+ * file and the snapshot disagree, the file is the newer truth: adopt it and
+ * write it back to process.env so the other direct readers converge too.
+ */
+function resolveDeepseekKey(): string | undefined {
+  let fileKey: string | undefined;
+  try {
+    const envPath = '/Users/zachstock/GitHub/prime/.env';
+    if (existsSync(envPath)) {
+      const match = readFileSync(envPath, 'utf-8').match(/^DEEPSEEK_API_KEY=(.+)$/m);
+      if (match) fileKey = match[1].trim().replace(/^['"]|['"]$/g, '');
+    }
+  } catch (_e) {}
+
+  if (fileKey) {
+    if (process.env.DEEPSEEK_API_KEY !== fileKey) process.env.DEEPSEEK_API_KEY = fileKey;
+    return fileKey;
+  }
+  return process.env.DEEPSEEK_API_KEY;
+}
 
 /**
  * Get the Claude provider for user-facing work.
@@ -196,23 +225,14 @@ export async function getBulkProvider(apiKey?: string, db?: any): Promise<LLMPro
     kdb.close();
     if (ks && ks.value === '1') throw new Error('LLM kill switch active (runaway burn detected) — clear graph_state.llm_kill_switch to resume');
   } catch (e: any) { if (String(e?.message).includes('kill switch')) throw e; }
-  if (_deepseekProvider) return _deepseekProvider;
+  // 1. .env file on disk, else the process.env snapshot (see resolveDeepseekKey)
+  // 2. config table (for legacy manual setup)
+  let deepseekKey = resolveDeepseekKey();
 
-  // 1. Env var (preferred — set by launchd plist or shell)
-  // 2. .env file in project root (for manual CLI runs)
-  // 3. config table (for legacy manual setup)
-  let deepseekKey = process.env.DEEPSEEK_API_KEY;
-  if (!deepseekKey) {
-    try {
-      const { readFileSync, existsSync } = await import('fs');
-      const envPath = '/Users/zachstock/GitHub/prime/.env';
-      if (existsSync(envPath)) {
-        const envContent = readFileSync(envPath, 'utf-8');
-        const match = envContent.match(/^DEEPSEEK_API_KEY=(.+)$/m);
-        if (match) deepseekKey = match[1].trim().replace(/^['"]|['"]$/g, '');
-      }
-    } catch (_e) {}
-  }
+  // Cache is keyed on the resolved key so a rotation rebuilds the provider
+  // instead of pinning the process to a revoked key for its whole lifetime.
+  if (_deepseekProvider && deepseekKey === _deepseekProviderKey) return _deepseekProvider;
+
   if (!deepseekKey && db) {
     try {
       const { getConfig } = await import('../db.js');
@@ -225,6 +245,7 @@ export async function getBulkProvider(apiKey?: string, db?: any): Promise<LLMPro
       apiKey: deepseekKey,
       baseUrl: 'https://api.deepseek.com',
     });
+    _deepseekProviderKey = deepseekKey;
     return _deepseekProvider;
   }
 
@@ -237,6 +258,7 @@ export async function getBulkProvider(apiKey?: string, db?: any): Promise<LLMPro
       apiKey: process.env.OPENROUTER_API_KEY,
       baseUrl: 'https://openrouter.ai/api/v1',
     });
+    _deepseekProviderKey = deepseekKey;
     return _deepseekProvider;
   }
 
