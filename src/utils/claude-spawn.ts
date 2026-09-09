@@ -1,4 +1,5 @@
 import { spawn, execFile, type ChildProcess } from 'child_process';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { promisify } from 'util';
@@ -45,6 +46,13 @@ export function buildClaudeCommand(options: {
     if (options.sessionId) args.push('--resume', options.sessionId);
     if (options.outputFormat === 'json') args.push('--output-format', 'json');
     if (options.maxTurns) args.push('--max-turns', String(options.maxTurns));
+    // Same MCP wiring the proxy applies. Without it this fallback inherits the
+    // daemon's cwd, picks up the repo's stale .mcp.json (dead /Users/zstoc paths)
+    // plus claude.ai account connectors, and the agent runs with zero prime tools.
+    const mcpConfig = join(homedir(), '.claude', '.mcp.json');
+    if (existsSync(mcpConfig) && !extra.includes('--mcp-config')) {
+      args.push('--mcp-config', mcpConfig, '--strict-mcp-config');
+    }
     args.push(...extra);
     return { cmd: 'claude', args };
   }
