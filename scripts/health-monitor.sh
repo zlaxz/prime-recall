@@ -107,6 +107,12 @@ if echo "$AUTH" | grep -qE '"exit_code":0'; then
 elif echo "$AUTH" | grep -qiE "401|authenticate|Invalid authentication"; then
   alert "$MSG_AUTH"
   ISSUES=$((ISSUES + 1))
+elif echo "$AUTH" | grep -qi "proxy busy"; then
+  # The one-claude-at-a-time gate is held by a long agent run; the proxy itself
+  # is healthy. Restarting here would kill that agent for nothing — same
+  # reasoning as the quota branch below. The pgrep guard above misses the race
+  # where an agent starts between the guard and this curl.
+  log "claude-proxy busy with a long agent run — auth probe deferred"
 elif echo "$AUTH" | grep -qiE "usage limit|rate.?limit|overloaded|resets at"; then
   # Quota exhaustion is NOT a proxy failure — restarting would kill any
   # in-flight agent session for nothing (audit finding 2026-08-31).
@@ -135,7 +141,9 @@ if [ "$(date +%M)" -lt 5 ]; then
     -d '{"prompt":"Call the prime_status MCP tool and reply with ONLY the total knowledge item count as a number. If the tool is unavailable reply exactly: NO_TOOLS","timeout":120}' 2>/dev/null)
   # Parse the JSON and test only the result field — digits in the JSON
   # wrapper (session ids) made the old grep false-pass (audit finding).
-  if echo "$TOOLS" | python3 -c '
+  if echo "$TOOLS" | grep -qi "proxy busy"; then
+    log "MCP tool probe deferred — proxy busy with a long agent run"
+  elif echo "$TOOLS" | python3 -c '
 import json, sys, re
 try: d = json.load(sys.stdin)
 except Exception: sys.exit(1)

@@ -114,7 +114,11 @@ export async function runClaude(prompt: string, options: {
   try {
     const result = await runClaudeViaProxy(prompt, options);
     return result;
-  } catch {
+  } catch (err: any) {
+    // "proxy busy" means the proxy answered and is serialising claude children.
+    // Falling back to a direct spawn here would run a SECOND claude concurrently,
+    // which is the OAuth-refresh race the proxy's gate exists to prevent.
+    if (String(err?.message || '').includes('proxy busy')) throw err;
     // Proxy unavailable — fall back to direct claude -p (works on laptop)
   }
 

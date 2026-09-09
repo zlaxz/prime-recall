@@ -6,6 +6,31 @@ import Cocoa
 // (observed 2026-08-07 and 2026-09-06). Requests queue; agents are patient.
 let claudeGate = DispatchSemaphore(value: 1)
 
+// A client that gave up (curl --max-time) leaves a half-closed socket behind.
+// Writing the response to it raises SIGPIPE, whose DEFAULT DISPOSITION KILLS
+// this whole process — so one abandoned request takes down every other agent
+// that is in flight or queued (2026-09-09: five PM agents lost to one 900s run;
+// `launchctl print` showed `last terminating signal = Broken pipe: 13`).
+// Ignore it and let write() return EPIPE like any other error.
+_ = signal(SIGPIPE, SIG_IGN)
+
+// Take the gate, but never for longer than the caller's own budget. Callers give
+// curl `timeout + 30`, so a request that has already queued for its full timeout
+// cannot finish inside the client's window — without this it would wake up, run
+// a claude nobody is listening to, and hold the gate for another full run.
+func acquireClaudeGate(seconds: Int) -> Bool {
+    return claudeGate.wait(timeout: .now() + .seconds(max(seconds, 1))) == .success
+}
+let busyBody = "{\"error\":\"proxy busy — another claude agent held the gate for this caller's full timeout\"}"
+
+// Seconds the caller has left after queueing. The caller's clock started when it
+// connected, not when we got the gate; spending a fresh full timeout on a run
+// whose client already hung up is what turns one slow agent into a starved queue.
+func remainingBudget(_ timeout: Int, since start: DispatchTime) -> Int {
+    let queued = Int(Double(DispatchTime.now().uptimeNanoseconds &- start.uptimeNanoseconds) / 1e9)
+    return max(timeout - queued, 1)
+}
+
 // ============================================================
 // Claude Proxy — Headless macOS GUI app
 //
@@ -168,8 +193,13 @@ class HTTPServer {
                 Zach says: \(message)
                 """
 
-            claudeGate.wait()
+            let gateStart = DispatchTime.now()
+            guard acquireClaudeGate(seconds: timeout) else {
+                sendResponse(fd, status: 503, body: busyBody)
+                return
+            }
             defer { claudeGate.signal() }
+            let runTimeout = remainingBudget(timeout, since: gateStart)
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
             proc.arguments = args
@@ -187,7 +217,7 @@ class HTTPServer {
                 stdinPipe.fileHandleForWriting.write(primePrompt.data(using: .utf8)!)
                 stdinPipe.fileHandleForWriting.closeFile()
 
-                let deadline = DispatchTime.now() + .seconds(timeout)
+                let deadline = DispatchTime.now() + .seconds(runTimeout)
                 let sem = DispatchSemaphore(value: 0)
                 DispatchQueue.global().async { proc.waitUntilExit(); sem.signal() }
 
@@ -254,7 +284,10 @@ class HTTPServer {
 
         // Background mode: spawn claude, respond immediately with 202, don't wait
         if isBackground {
-            claudeGate.wait()
+            guard acquireClaudeGate(seconds: timeout) else {
+                sendResponse(fd, status: 503, body: busyBody)
+                return
+            }
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
             proc.arguments = args
@@ -279,8 +312,13 @@ class HTTPServer {
             return
         }
 
-        claudeGate.wait()
+        let gateStart = DispatchTime.now()
+        guard acquireClaudeGate(seconds: timeout) else {
+            sendResponse(fd, status: 503, body: busyBody)
+            return
+        }
         defer { claudeGate.signal() }
+        let runTimeout = remainingBudget(timeout, since: gateStart)
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
         proc.arguments = args
@@ -299,7 +337,7 @@ class HTTPServer {
             stdinPipe.fileHandleForWriting.closeFile()
 
             // Wait with timeout
-            let deadline = DispatchTime.now() + .seconds(timeout)
+            let deadline = DispatchTime.now() + .seconds(runTimeout)
             let sem = DispatchSemaphore(value: 0)
             DispatchQueue.global().async {
                 proc.waitUntilExit()
@@ -308,7 +346,7 @@ class HTTPServer {
 
             if sem.wait(timeout: deadline) == .timedOut {
                 proc.terminate()
-                sendResponse(fd, status: 504, body: "{\"error\":\"timeout after \(timeout)s\"}")
+                sendResponse(fd, status: 504, body: "{\"error\":\"timeout after \(runTimeout)s\"}")
                 return
             }
 
@@ -339,9 +377,19 @@ class HTTPServer {
     }
 
     func sendResponse(_ fd: Int32, status: Int, body: String) {
-        let statusText = status == 200 ? "OK" : status == 202 ? "Accepted" : status == 400 ? "Bad Request" : status == 404 ? "Not Found" : status == 504 ? "Gateway Timeout" : "Error"
+        let statusText = status == 200 ? "OK" : status == 202 ? "Accepted" : status == 400 ? "Bad Request" : status == 404 ? "Not Found" : status == 503 ? "Service Unavailable" : status == 504 ? "Gateway Timeout" : "Error"
         let response = "HTTP/1.1 \(status) \(statusText)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n\(body)"
-        write(fd, response, response.utf8.count)
+        // Write in a loop and tolerate a vanished client: with SIGPIPE ignored a
+        // dead peer surfaces as write() == -1 (EPIPE) instead of killing the proxy.
+        let bytes = Array(response.utf8)
+        bytes.withUnsafeBufferPointer { buf in
+            var sent = 0
+            while sent < bytes.count {
+                let n = write(fd, buf.baseAddress! + sent, bytes.count - sent)
+                if n <= 0 { break }
+                sent += n
+            }
+        }
         close(fd)
     }
 }
