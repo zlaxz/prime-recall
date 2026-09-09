@@ -1,7 +1,7 @@
 import { spawn, execFile, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
@@ -172,11 +172,15 @@ async function runClaudeViaProxy(prompt: string, options: {
  * with the Swift proxy's body reader.
  */
 async function runClaudeViaProxyCurl(jsonBody: string, timeoutSec: number): Promise<string> {
-  const { writeFileSync, unlinkSync } = await import('fs');
-  const tmpPath = `/tmp/prime-proxy-${Date.now()}.json`;
+  const { writeFileSync, unlinkSync, mkdtempSync, rmdirSync } = await import('fs');
+  // Not /tmp: it is world-readable, and these bodies are full agent prompts
+  // (mail, deals, contacts). A predictable name there is also pre-creatable
+  // by any local process, so writeFileSync would follow a planted symlink.
+  const tmpDir = mkdtempSync(join(tmpdir(), 'prime-proxy-'));
+  const tmpPath = join(tmpDir, 'body.json');
 
   try {
-    writeFileSync(tmpPath, jsonBody);
+    writeFileSync(tmpPath, jsonBody, { mode: 0o600 });
 
     const { stdout, stderr } = await execFileAsync('/usr/bin/curl', [
       '-s', '-X', 'POST',
@@ -199,6 +203,7 @@ async function runClaudeViaProxyCurl(jsonBody: string, timeoutSec: number): Prom
     }
   } finally {
     try { unlinkSync(tmpPath); } catch {}
+    try { rmdirSync(tmpDir); } catch {}
   }
 }
 
