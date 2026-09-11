@@ -360,8 +360,10 @@ async function tick() {
       }
       // This used to be `2>/dev/null || true`, which hid every rejection: GitHub
       // took a laptop commit (5b6cb67, 2026-04-27) this tree never pulled, and
-      // each push after it was a non-fast-forward reject nobody saw. This only
-      // pushes, never pulls — health-monitor.sh §7e alerts Zach to reconcile.
+      // each push after it was a non-fast-forward reject nobody saw.
+      // ff-only pull first: laptop-only commits merge in cleanly; a genuine
+      // divergence still fails loudly and pages via health-monitor §7e.
+      try { execSync('git pull --ff-only origin main', { cwd, stdio: 'pipe' }); } catch (_e) {}
       try {
         execSync("git push origin main", { cwd, encoding: "utf-8", stdio: "pipe" });
       } catch (e: any) {

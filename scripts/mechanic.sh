@@ -81,7 +81,10 @@ fi
 
 log "START [$SOURCE] attempt $((ATTEMPTS+1)) ${ISSUE:0:110}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+umask 077  # repair-run scratch must never be world-readable (a key leaked via /tmp, 2026-09-10)
 WORK=$(mktemp -d /tmp/mechanic.XXXXXX)
+export TMPDIR="$WORK/tmp"   # any scratch the repair session makes dies with $WORK
+mkdir -p "$TMPDIR"
 
 # ── context bundle (fenced: logs quote third-party email text) ──
 {
