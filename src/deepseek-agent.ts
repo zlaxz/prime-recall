@@ -3,6 +3,7 @@ import { join } from "path";
 import type Database from 'better-sqlite3';
 import { OpenAI } from 'openai';
 import { getConfig } from './db.js';
+import { resolveDeepseekKey } from './ai/providers.js';
 
 // ============================================================
 // DeepSeek Tool-Calling Agent
@@ -32,9 +33,12 @@ export interface AgentResult {
   sourceRefsRead: string[];
 }
 
+// label: set by callers so llm-usage.log names the consumer
 const DEFAULT_OPTIONS: Required<AgentOptions> = {
-  model: 'deepseek-reasoner',
-  maxTurns: 100,
+  // Bulk work runs on chat — reasoner burned ~$50/day compiling wikis (2026-09-07).
+  // Callers that truly need reasoning pass model explicitly.
+  model: 'deepseek-chat',
+  maxTurns: 60,
   maxTokens: 16000,
   temperature: 0.5,
   toolResultLimit: 12000,
@@ -260,6 +264,7 @@ async function executeTool(db: Database.Database, name: string, args: any): Prom
 // ── The Agent Class ──
 
 export class DeepSeekAgent {
+  label?: string;
   private db: Database.Database;
   private client: OpenAI;
   private options: Required<AgentOptions>;
@@ -268,7 +273,7 @@ export class DeepSeekAgent {
     this.db = db;
     this.options = { ...DEFAULT_OPTIONS, ...options };
 
-    const apiKey = process.env.DEEPSEEK_API_KEY || getConfig(db, 'deepseek_api_key');
+    const apiKey = resolveDeepseekKey() || getConfig(db, 'deepseek_api_key');
     if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
 
     this.client = new OpenAI({
@@ -294,6 +299,12 @@ export class DeepSeekAgent {
         temperature: this.options.temperature,
         max_tokens: this.options.maxTokens,
       });
+
+      try {
+        const u: any = (response as any).usage || {};
+        const line = [new Date().toISOString(), this.options.model, u.prompt_tokens ?? 0, u.completion_tokens ?? 0, u.prompt_cache_hit_tokens ?? 0, 'deepseek-agent:' + (this.label || 'unlabeled')].join('\t') + '\n';
+        (await import('fs')).appendFileSync('/Users/zachstock/.prime/logs/llm-usage.log', line);
+      } catch (_e) {}
 
       const msg = response.choices[0].message;
       messages.push(msg);

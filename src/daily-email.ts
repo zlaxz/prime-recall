@@ -1,7 +1,9 @@
 import type Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
+import { readFileSync , readdirSync } from 'fs';
 import { join } from 'path';
 import { sendEmail } from './connectors/gmail.js';
+import { buildCoverage, getProposals } from './ledger.js';
+import { heldToday } from './email-budget.js';
 
 // ============================================================
 // Quinn's Daily Email — sends FOCUS.md as an email to Zach
@@ -60,6 +62,8 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
       '- Consider Zach\'s current state. Filter ruthlessly. Less is more.',
       '- If something can wait, say "this can wait"',
       '- Under 250 words. ADHD — shorter is better.',
+      '- Render every date as a countdown first: "in 5 days (Sep 5)" — never a bare date. Time-blindness is real.',
+      '- A status header (cleared items, open actions, system health) is prepended automatically — do NOT repeat that information.',
       '- NO bullet points, NO headers. Natural email.',
       '',
       'Return ONLY the email body text.',
@@ -77,6 +81,53 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
       return false;
     }
 
+    // Structured brief data (deterministic, from the DB) → readable HTML.
+    // Human words only: no monitor ids, ledger keys, tiers or cycle chatter.
+    const { renderBriefHtml, renderBriefText, humanTitle, monitorName, whenText } = await import('./email-format.js');
+    const { buildCoverage, getProposals } = await import('./ledger.js');
+    const { heldToday } = await import('./email-budget.js');
+    const briefData: any = { actions: [], cleared: [], proposals: [], deadlines: [], coverage: [], held: 0, system: '' };
+    try {
+      const acts = db.prepare(
+        "SELECT title, next_action, deadline, ball_since, notified_at, monitor FROM ledger WHERE tier='act' AND status='open' ORDER BY notified_at IS NULL, deadline IS NULL, deadline LIMIT 3"
+      ).all() as any[];
+      briefData.actions = acts.map((a: any) => ({
+        title: humanTitle(a.title), when: whenText(a.deadline),
+        why: a.ball_since && !a.deadline ? `waiting since ${a.ball_since}` : '', inInbox: !!a.notified_at,
+      }));
+      briefData.queued = Math.max(0, (db.prepare("SELECT COUNT(*) n FROM ledger WHERE tier='act' AND status='open'").get() as any).n - acts.length);
+      const cleared = db.prepare(
+        "SELECT title, deliverable FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-1 day') ORDER BY resolved_at DESC LIMIT 5"
+      ).all() as any[];
+      briefData.cleared = cleared.map((c: any) => ({ title: humanTitle(c.title), file: c.deliverable }));
+      const props: any[] = getProposals(db, 3);
+      (briefData as any).props = props;
+      try {
+        const { getQuinnApproved } = await import('./ledger.js');
+        briefData.quinnApproved = getQuinnApproved(db).map((q: any) => ({ title: humanTitle(q.title.replace(/^I could\s+/i, ''), 100), from: monitorName(db, q.monitor), why: q.triage_note || '' }));
+      } catch {}
+      briefData.proposals = props.map((pr: any, i: number) => ({ n: i + 1, title: humanTitle(pr.title.replace(/^I could\s+/i, ''), 110), from: monitorName(db, pr.monitor) }));
+      const dl = db.prepare(
+        "SELECT title, deadline FROM ledger WHERE status='open' AND deadline IS NOT NULL AND date(deadline) <= date('now','localtime','+7 days') ORDER BY date(deadline) LIMIT 6"
+      ).all() as any[];
+      briefData.deadlines = dl.map((x: any) => ({ title: humanTitle(x.title, 80), when: whenText(x.deadline) }));
+      const cov: string[] = buildCoverage(db);
+      briefData.coverage = cov.map((line: string) => {
+        const name = line.split(' — ')[0];
+        const never = /ran never/.test(line); const muted = /MUTED/.test(line);
+        return { name, ok: !never && !muted, note: never ? 'has not run yet' : muted ? 'muted (you skipped its last actions)' : '' };
+      });
+      const monitors = (db.prepare("SELECT COUNT(*) n FROM agent_state WHERE agent_type='pm' AND last_run_at >= datetime('now','-1 day')").get() as any)?.n ?? '?';
+      const mech = (db.prepare("SELECT COUNT(*) n FROM knowledge WHERE source='mechanic-report' AND created_at >= datetime('now','-1 day')").get() as any).n;
+      let brokenTxt = 'health unknown';
+      try { const n = readdirSync(join(homedir, '.prime', 'health-alerts')).filter((f: string) => !f.endsWith('.dispatched')).length; brokenTxt = n === 0 ? 'nothing broken' : `${n} issue${n === 1 ? '' : 's'} flagged`; } catch {}
+      briefData.system = `${monitors} monitors ran · ${mech} mechanic run${mech === 1 ? '' : 's'} · ${brokenTxt}`;
+      try { briefData.held = heldToday(db).n; } catch {}
+    } catch (e: any) { console.log('[quinn-email] brief data failed: ' + (e?.message || e)); }
+    const buildBriefHeader: any = () => '';
+    (buildBriefHeader as any).props = (briefData as any).props || [];
+    const briefHeader = '';
+
     // Get subject from brief or FOCUS
     const briefRaw = (db.prepare(
       "SELECT value FROM graph_state WHERE key = 'intelligence_brief'"
@@ -89,25 +140,15 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
     });
     const kbCount = (db.prepare('SELECT COUNT(*) as c FROM knowledge').get() as any)?.c || '?';
 
-    // Clean HTML email
-    const esc = (s: string) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
-
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
-<body style="margin:0;padding:0;background:#0a0e12;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-<div style="max-width:600px;margin:0 auto;padding:32px 24px;">
-  <div style="font-size:15px;color:#cbd5e1;line-height:1.7;">
-    ${esc(emailBody)}
-  </div>
-  <div style="margin-top:32px;padding-top:16px;border-top:1px solid #1e293b;">
-    <div style="font-size:13px;font-weight:500;color:#94a3b8;">Quinn Parker</div>
-    <div style="font-size:11px;color:#475569;">AI Chief of Staff, Recapture Insurance</div>
-    <div style="font-size:10px;color:#334155;margin-top:8px;">${date} | ${kbCount} items tracked | Reply to update Prime</div>
-  </div>
-</div></body></html>`;
+    // Readable HTML brief; plain-text twin is what the reply intent layer sees
+    const rawSubjectPre = brief.headline?.slice(0, 80) || (focus.match(/## The One Thing\n(.+)/)?.[1] || '').slice(0, 80) || 'Morning Brief';
+    const full = { ...briefData, date, headline: rawSubjectPre, prose: emailBody.trim() };
+    const html = renderBriefHtml(full);
+    const bodyWithHeader = renderBriefText(full);
 
     const theOneThing = focus.match(/## The One Thing\n(.+)/)?.[1] || '';
     const rawSubject = brief.headline?.slice(0, 80) || theOneThing.slice(0, 80) || 'Morning Brief';
-    const subject = rawSubject.replace(/\u2014/g, '-').replace(/[^\x20-\x7E]/g, '');
+    const subject = '[BRIEF] ' + rawSubject.replace(/\u2014/g, '-').replace(/[^\x20-\x7E]/g, '');
 
     const result = await sendEmail(db, {
       to: 'zach.stock@recaptureinsurance.com',
@@ -121,6 +162,16 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
       db.prepare(
         "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('cos_email_body', ?, datetime('now'))"
       ).run(focus);
+      try {
+        // keyed by SUBJECT (mailbox-safe; Gmail thread ids differ per mailbox) — the
+        // exact list and body Zach saw, so "#2" means the #2 in THIS email forever
+        const props: any[] = (buildBriefHeader as any).props || [];
+        db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+          .run(`brief_sent:${subject.replace(/^\[BRIEF\]\s*/, '').slice(0, 120)}`, JSON.stringify({
+            sent_at: new Date().toISOString(), body: bodyWithHeader.slice(0, 6000),
+            proposals: props.map((pr: any) => ({ id: pr.id, title: pr.title, monitor: pr.monitor })),
+          }));
+      } catch {}
       console.log('[quinn-email] Sent: "' + subject.slice(0, 60) + '"');
       return true;
     } else {

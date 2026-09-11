@@ -10,13 +10,18 @@ import { extractIntelligence } from '../ai/extract.js';
 import { askWithSources } from '../ai/ask.js';
 import { v4 as uuid } from 'uuid';
 import { processOtterMeeting } from '../connectors/otter.js';
-import { startScheduler } from '../scheduler.js';
 import { registerPrimeTools, MCP_SERVER_CONFIG } from './mcp.js';
+import { isValidBearer as oauthValidBearer } from './oauth.js';
+
+// Secret MCP path: set PRIME_MCP_PATH=/mcp-<random> in .env; old /mcp then falls under API-key auth
+const MCP_PATH = process.env.PRIME_MCP_PATH || '/mcp';
 import { getAmbientDisplayHTML } from './ambient-display.js';
-import { mutateSoulFromCorrection } from '../soul-mutation.js';
 
 export async function startServer(port: number = 3210, options: { sync?: boolean; syncInterval?: number } = {}) {
   const app = express();
+  // cloudflared delivers tunnel traffic from 127.0.0.1; without this, req.ip is
+  // always localhost and the localhost auth exemption applies to the whole internet.
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '10mb' }));
 
   // ── SECURITY: API Key Authentication ──
@@ -29,6 +34,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     'http://localhost:8080',                    // Local dev (prime-production)
     'https://prime.recaptureinsurance.com',     // Self (tunnel)
     'https://prime-command.lovable.app',        // Published Lovable app
+    'https://claude.ai',                        // claude.ai web (MCP connector check runs in the browser)
   ];
 
   app.use((_req, res, next) => {
@@ -38,7 +44,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
       res.header('Access-Control-Allow-Origin', origin);
     }
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, mcp-session-id');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, mcp-session-id, mcp-protocol-version');
+    res.header('Access-Control-Expose-Headers', 'mcp-session-id');
     if (_req.method === 'OPTIONS') return res.sendStatus(200);
     next();
   });
@@ -46,7 +53,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // Auth middleware — require API key for untrusted requests
   app.use((req, res, next) => {
     // Skip auth for health/status/MCP
-    if (req.path === '/api/health' || req.path === '/api/status' || req.path.startsWith('/mcp')) return next();
+    if (req.path === '/api/health' || req.path === '/api/status' || req.path.startsWith(MCP_PATH) || req.path.startsWith('/.well-known/') || req.path === '/register' || req.path.startsWith('/authorize') || req.path === '/token') return next();
     // Skip auth for localhost
     const ip = req.ip || req.socket.remoteAddress || '';
     if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
@@ -57,6 +64,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     if (API_KEY) {
       const key = (req.headers['x-api-key'] as string) || req.headers.authorization?.replace('Bearer ', '');
       if (!key || key !== API_KEY) {
+        console.log('  [auth 401] ' + req.method + ' ' + req.path.slice(0, 60));
         return res.status(401).json({ error: 'unauthorized' });
       }
     }
@@ -870,17 +878,21 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
       } catch { /* non-critical */ }
 
       // Use curl for proxy calls — http.request doesn't wait for multi-turn tool sessions
-      const { writeFileSync, unlinkSync } = await import('fs');
+      const { writeFileSync, unlinkSync, mkdtempSync, rmdirSync } = await import('fs');
+      const { tmpdir } = await import('os');
       const { promisify } = await import('util');
       const { execFile } = await import('child_process');
       const execFileAsync = promisify(execFile);
 
       const body = JSON.stringify({ message, session_id: session_id || '', timeout: 120 });
-      const tmpPath = `/tmp/prime-chat-${Date.now()}.json`;
+      // Not a bare /tmp path: that was 0644 under launchd's umask with a
+      // clock-guessable, symlink-followable name, and it holds Zach's message.
+      const tmpDir = mkdtempSync(join(tmpdir(), 'prime-chat-'));
+      const tmpPath = join(tmpDir, 'body.json');
 
       let result: any;
       try {
-        writeFileSync(tmpPath, body);
+        writeFileSync(tmpPath, body, { mode: 0o600 });
         const { stdout } = await execFileAsync('/usr/bin/curl', [
           '-s', '-X', 'POST', 'http://127.0.0.1:3211/prime',
           '-H', 'Content-Type: application/json',
@@ -891,6 +903,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
         catch { result = { content: stdout, session_id: '' }; }
       } finally {
         try { unlinkSync(tmpPath); } catch {}
+        try { rmdirSync(tmpDir); } catch {}
       }
 
       // Store Quinn's response in KB for agent access
@@ -972,18 +985,6 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     }
   });
 
-  // ── Action approval (for ambient display + API clients) ──
-  app.post('/api/approve-action', async (req, res) => {
-    try {
-      const { id } = req.body;
-      if (!id) return res.status(400).json({ error: 'id required' });
-      const { executeAction } = await import('../actions.js');
-      const result = await executeAction(db, id);
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
 
   // ── Dismiss action with feedback → creates correction rule ──
   app.post('/api/dismiss-action', async (req, res) => {
@@ -1643,9 +1644,11 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   // GET /mcp establishes SSE stream, POST /mcp/messages sends JSON-RPC
   const mcpTransports = new Map<string, SSEServerTransport>();
 
-  app.get('/mcp', async (req, res) => {
+  app.get('/mcp-sse-legacy', async (req, res) => {
+    const lg = String(req.headers.authorization || '');
+    if (!lg.startsWith('Bearer ') || !oauthValidBearer(lg.slice(7))) { res.status(401).json({ error: 'unauthorized' }); return; }
     try {
-      const transport = new SSEServerTransport('/mcp/messages', res);
+      const transport = new SSEServerTransport('/mcp-sse-legacy/messages', res);
       const sessionId = transport.sessionId;
       mcpTransports.set(sessionId, transport);
 
@@ -1664,7 +1667,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     }
   });
 
-  app.post('/mcp/messages', async (req, res) => {
+  app.post('/mcp-sse-legacy/messages', async (req, res) => {
     const sessionId = req.query.sessionId as string;
     if (!sessionId) {
       res.status(400).send('Missing sessionId parameter');
@@ -1776,13 +1779,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
 
       if (cmd.startsWith('approve ')) {
         const id = text.replace(/^approve\s+/i, '').trim();
-        try {
-          const { executeAction } = await import('../actions.js');
-          const result = await executeAction(db, id);
-          res.json({ intent: 'approve', result });
-        } catch (err: any) {
-          res.json({ intent: 'approve', error: err.message });
-        }
+        res.json({ intent: 'approve', error: 'staged actions retired 2026-09-08 — use the ledger/proposals flow' });
+        void id;
         return;
       }
 
@@ -2302,10 +2300,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     }
 
 
-    // Mutate SOUL.md files based on the correction (async, non-blocking)
-    mutateSoulFromCorrection(db, { claim, correction, project }).catch(err =>
-      console.error("[soul-mutation] Failed:", err.message)
-    );
+    // soul-mutation retired 2026-09-08
 
     res.json({ success: true, id });
   });
@@ -2693,6 +2688,8 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
 
   // ── Mount MCP over HTTP for claude.ai remote access ──
   try {
+    const { mountOAuth } = await import('./oauth.js');
+    mountOAuth(app);
     const { mountMcpHttp } = await import('./mcp-http.js');
     mountMcpHttp(app);
   } catch (err: any) {
@@ -2710,14 +2707,15 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
     console.log('    POST /api/remember  — Quick capture');
     console.log('    GET  /api/status    — Knowledge base stats');
     console.log('    GET  /api/query/*   — Structured queries');
-    console.log('    ALL  /mcp           — MCP over HTTP (for remote Claude Desktop)');
+    // Not '/mcp': the endpoint lives at the secret PRIME_MCP_PATH (mcp-http.ts), and bare
+    // /mcp is left to 404/401 on purpose. Print the real (truncated) path so this banner
+    // can't send the next reader testing a path that is supposed to be dead.
+    console.log(`    ALL  ${MCP_PATH.slice(0, 8)}${MCP_PATH.length > 8 ? '…' : ''}      — MCP over HTTP (for remote Claude Desktop)`);
     console.log('    POST /api/webhooks/otter — Otter.ai webhook');
     console.log('    POST /api/simulate   — Simulation Room (practice conversations)');
     console.log('    POST /api/stripe/webhook — Stripe webhook');
     console.log('    POST /api/v1/auth/key    — API key validation\n');
 
-    if (options.sync !== false) {
-      startScheduler(options.syncInterval || 15);
-    }
+    // scheduler retired 2026-09-08 — shift owns sync; serve always runs --no-sync
   });
 }

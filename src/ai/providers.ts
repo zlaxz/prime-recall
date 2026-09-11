@@ -1,9 +1,9 @@
 import OpenAI from 'openai';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, unlinkSync } from 'fs';
+import { writeFileSync, unlinkSync, appendFileSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 import { spawnClaude, buildClaudeEnv } from '../utils/claude-spawn.js';
 
 const execFileAsync = promisify(execFile);
@@ -102,6 +102,28 @@ function createClaudeCodeProvider(): LLMProvider {
 }
 
 /**
+ * Append one line per paid LLM call to ~/.prime/logs/llm-usage.log so runaway
+ * spend can be attributed to a caller instead of inferred from the balance curve.
+ * Caller is taken from the stack — the burner shows up as the dominant frame.
+ */
+function logLLMUsage(model: string, usage: any) {
+  try {
+    const frames = (new Error().stack || '').split('\n').slice(3, 9)
+      .map(l => (l.match(/at (?:async )?([\w.<>]+)/) || [])[1])
+      .filter((f): f is string => !!f && !['chat', 'logLLMUsage'].includes(f));
+    const caller = frames.slice(0, 3).join('<') || 'unknown';
+    const line = [
+      new Date().toISOString(), model,
+      usage?.prompt_tokens ?? -1,
+      usage?.completion_tokens ?? -1,
+      usage?.prompt_cache_hit_tokens ?? -1,
+      caller,
+    ].join('\t') + '\n';
+    appendFileSync(join(homedir(), '.prime', 'logs', 'llm-usage.log'), line);
+  } catch (_e) {}
+}
+
+/**
  * OpenAI-compatible API provider — works with OpenAI, DeepSeek, OpenRouter.
  * Used as fallback for users without Claude Max, or for embeddings.
  */
@@ -117,6 +139,7 @@ function createAPIProvider(config: { model: string; apiKey: string; baseUrl?: st
         max_tokens: options.max_tokens ?? 2000,
         ...(options.json ? { response_format: { type: 'json_object' as const } } : {}),
       });
+      logLLMUsage(config.model, response.usage);
       return response.choices[0]?.message?.content || '';
     }
   };
@@ -125,6 +148,35 @@ function createAPIProvider(config: { model: string; apiKey: string; baseUrl?: st
 // Cached provider instances
 let _claudeProvider: LLMProvider | null = null;
 let _deepseekProvider: LLMProvider | null = null;
+let _deepseekProviderKey: string | undefined = undefined;
+
+/**
+ * Resolve the DeepSeek key, preferring the .env file on disk over a stale
+ * process.env snapshot.
+ *
+ * Every daemon does `import 'dotenv/config'` at boot, so process.env is a
+ * point-in-time copy of .env — it does NOT track a later key rotation. A
+ * long-lived process (serve runs for days) then keeps using a revoked key and
+ * 401s forever while every short-lived caller reads the good key. So when the
+ * file and the snapshot disagree, the file is the newer truth: adopt it and
+ * write it back to process.env so the other direct readers converge too.
+ */
+export function resolveDeepseekKey(): string | undefined {
+  let fileKey: string | undefined;
+  try {
+    const envPath = '/Users/zachstock/GitHub/prime/.env';
+    if (existsSync(envPath)) {
+      const match = readFileSync(envPath, 'utf-8').match(/^DEEPSEEK_API_KEY=(.+)$/m);
+      if (match) fileKey = match[1].trim().replace(/^['"]|['"]$/g, '');
+    }
+  } catch (_e) {}
+
+  if (fileKey) {
+    if (process.env.DEEPSEEK_API_KEY !== fileKey) process.env.DEEPSEEK_API_KEY = fileKey;
+    return fileKey;
+  }
+  return process.env.DEEPSEEK_API_KEY;
+}
 
 /**
  * Get the Claude provider for user-facing work.
@@ -144,8 +196,9 @@ export async function getDefaultProvider(apiKey?: string): Promise<LLMProvider> 
   } catch (_e) {}
 
   // Fall back to DeepSeek via OpenRouter or direct
-  if (process.env.DEEPSEEK_API_KEY) {
-    _claudeProvider = createAPIProvider({ model: 'deepseek-chat', apiKey: process.env.DEEPSEEK_API_KEY, baseUrl: 'https://api.deepseek.com' });
+  const deepseekKey = resolveDeepseekKey();
+  if (deepseekKey) {
+    _claudeProvider = createAPIProvider({ model: 'deepseek-chat', apiKey: deepseekKey, baseUrl: 'https://api.deepseek.com' });
     return _claudeProvider;
   }
   if (process.env.OPENROUTER_API_KEY) {
@@ -164,23 +217,23 @@ export async function getDefaultProvider(apiKey?: string): Promise<LLMProvider> 
  * Falls back to Claude if DEEPSEEK_API_KEY not set.
  */
 export async function getBulkProvider(apiKey?: string, db?: any): Promise<LLMProvider> {
-  if (_deepseekProvider) return _deepseekProvider;
+  // Watchdog sets this when the balance drains faster than any legitimate
+  // workload can explain — every paid bulk call then fails fast and free.
+  try {
+    const Database = (await import('better-sqlite3')).default;
+    const kdb = new Database('/Users/zachstock/.prime/prime.db', { readonly: true });
+    const ks = kdb.prepare("SELECT value FROM graph_state WHERE key='llm_kill_switch'").get() as any;
+    kdb.close();
+    if (ks && ks.value === '1') throw new Error('LLM kill switch active (runaway burn detected) — clear graph_state.llm_kill_switch to resume');
+  } catch (e: any) { if (String(e?.message).includes('kill switch')) throw e; }
+  // 1. .env file on disk, else the process.env snapshot (see resolveDeepseekKey)
+  // 2. config table (for legacy manual setup)
+  let deepseekKey = resolveDeepseekKey();
 
-  // 1. Env var (preferred — set by launchd plist or shell)
-  // 2. .env file in project root (for manual CLI runs)
-  // 3. config table (for legacy manual setup)
-  let deepseekKey = process.env.DEEPSEEK_API_KEY;
-  if (!deepseekKey) {
-    try {
-      const { readFileSync, existsSync } = await import('fs');
-      const envPath = '/Users/zachstock/GitHub/prime/.env';
-      if (existsSync(envPath)) {
-        const envContent = readFileSync(envPath, 'utf-8');
-        const match = envContent.match(/^DEEPSEEK_API_KEY=(.+)$/m);
-        if (match) deepseekKey = match[1].trim().replace(/^['"]|['"]$/g, '');
-      }
-    } catch (_e) {}
-  }
+  // Cache is keyed on the resolved key so a rotation rebuilds the provider
+  // instead of pinning the process to a revoked key for its whole lifetime.
+  if (_deepseekProvider && deepseekKey === _deepseekProviderKey) return _deepseekProvider;
+
   if (!deepseekKey && db) {
     try {
       const { getConfig } = await import('../db.js');
@@ -193,6 +246,7 @@ export async function getBulkProvider(apiKey?: string, db?: any): Promise<LLMPro
       apiKey: deepseekKey,
       baseUrl: 'https://api.deepseek.com',
     });
+    _deepseekProviderKey = deepseekKey;
     return _deepseekProvider;
   }
 
@@ -205,6 +259,7 @@ export async function getBulkProvider(apiKey?: string, db?: any): Promise<LLMPro
       apiKey: process.env.OPENROUTER_API_KEY,
       baseUrl: 'https://openrouter.ai/api/v1',
     });
+    _deepseekProviderKey = deepseekKey;
     return _deepseekProvider;
   }
 

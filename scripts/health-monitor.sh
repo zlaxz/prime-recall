@@ -1,149 +1,413 @@
 #!/bin/bash
 # ============================================================
-# Prime Self-Healing Health Monitor
+# Prime Self-Healing Health Monitor  (v3 — 2026-08-31 audit rebuild)
 #
-# Runs every 5 minutes. Checks all systems. Fixes what it can.
-# Only alerts Zach when something is unfixable.
+# Runs every 5 min via com.prime.health LaunchAgent (GUI session,
+# AbandonProcessGroup=true so dispatched mechanic runs survive exit).
 #
-# Checks: daemons, sync freshness, token validity, DB integrity,
-#          tunnel status, disk space
+# Philosophy: fix what it can silently; email/text Zach ONLY when
+# something is unfixable or needs a human.
+#
+# v3 (audit): every check's alert/clear text is ONE variable — the
+# 2026-08-31 audit found 7 of 9 checks had mismatched alert vs clear
+# strings, so resolved alerts never cleared (md5-keyed files leaked),
+# permanently silencing re-alerts and re-dispatching the mechanic
+# every 6h forever. Changing detail (hours, GB) goes in log() only.
 # ============================================================
 
-LOG="$HOME/.prime/logs/health.log"
 PRIME_DIR="$HOME/GitHub/prime"
-ALERT_FILE="$HOME/.prime/health-alert"
+DB="$HOME/.prime/prime.db"
+LOG="$HOME/.prime/logs/health-monitor.log"
+ALERT_DIR="$HOME/.prime/health-alerts"
+UID_Z=$(id -u)
+mkdir -p "$ALERT_DIR"
 
-log() { echo "[$(date '+%H:%M')] $1" >> "$LOG"; }
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin"
+cd "$PRIME_DIR" || exit 1
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M')] $1" >> "$LOG"; }
+
+# alert: dedup by message hash so a persistent issue pings once, not every 5 min.
 alert() {
-  # Only alert once per issue (dedup by message hash)
-  HASH=$(echo "$1" | md5 -q)
-  if [ ! -f "$ALERT_FILE.$HASH" ]; then
-    touch "$ALERT_FILE.$HASH"
-    # Send iMessage alert
-    PHONE=$(sqlite3 ~/.prime/prime.db "SELECT value FROM config WHERE key='notify_phone_number'" 2>/dev/null | tr -d '"')
-    if [ -n "$PHONE" ]; then
-      osascript <<SCPT
-tell application "Messages" to send "[PRIME HEALTH] $1" to buddy "$PHONE"
-SCPT
-    fi
-    log "ALERT: $1"
+  local m="$1"
+  local hash
+  hash=$(echo "$m" | md5 -q)
+  if [ ! -f "$ALERT_DIR/$hash" ]; then
+    echo "$m" > "$ALERT_DIR/$hash"
+    log "ALERT: $m"
+    npx tsx scripts/prime-alert.ts "$m" >> "$LOG" 2>&1
   fi
 }
+
+# clear_alert: issue resolved -> remove marker AND its dispatch marker.
 clear_alert() {
-  HASH=$(echo "$1" | md5 -q)
-  rm -f "$ALERT_FILE.$HASH" 2>/dev/null
+  local hash
+  hash=$(echo "$1" | md5 -q)
+  rm -f "$ALERT_DIR/$hash" "$ALERT_DIR/$hash.dispatched" 2>/dev/null
+}
+
+restart_daemon() {  # label
+  log "restarting $1..."
+  launchctl kickstart -k "gui/$UID_Z/$1" 2>/dev/null
 }
 
 ISSUES=0
 
-# ── Check daemons ──────────────────────────────────────
-for DAEMON in serve sync listen tunnel; do
-  if ! launchctl list 2>/dev/null | grep -q "com.prime-recall.$DAEMON"; then
-    log "Daemon $DAEMON not loaded — reloading..."
-    launchctl load ~/Library/LaunchAgents/com.prime-recall.$DAEMON.plist 2>/dev/null
-    sleep 2
-    if launchctl list 2>/dev/null | grep -q "com.prime-recall.$DAEMON"; then
-      log "✓ Daemon $DAEMON recovered"
-      clear_alert "$DAEMON daemon down"
-    else
-      alert "$DAEMON daemon won't start. Check manually."
-      ISSUES=$((ISSUES + 1))
-    fi
-  fi
-done
+# Stable alert texts — used by BOTH alert() and clear_alert(). Never
+# embed changing numbers here; put those in log() lines.
+MSG_SERVE="serve API (port 3210) is down and would not restart."
+MSG_AUTH="Claude auth FAILED (401) — Quinn cannot reason. Fix: run 'claude' in a Terminal on the Mac Mini to re-login."
+MSG_PROXY="claude-proxy not responding (port 3211) — Quinn/PM agents cannot run."
+MSG_QUOTA="Claude usage limit hit — proxy is fine, quota is exhausted. Agents resume when the limit resets; no restart needed."
+MSG_TOOLS="Agents have no MCP tools via proxy — Quinn/PMs are dark."
+MSG_SHIFT="shift daemon (intelligence cycle) is down and would not restart."
+MSG_BRIEF="Intelligence brief is stale and auto-regen failed."
+MSG_DB="Database integrity check failed."
+MSG_DISK="Low disk space on Mac Mini."
+MSG_DEEPSEEK="DeepSeek API balance depleted — wiki compilation and claim verification fail every 4h cycle. Top up at platform.deepseek.com."
+MSG_BURN="DeepSeek burning faster than any legitimate workload — LLM kill switch ENGAGED. Investigate llm-usage.log, then clear graph_state.llm_kill_switch to resume."
+MSG_MONITORS="pm_agents roster is missing or has zero active monitors — all PM agents dark."
+MSG_STALEENV="A daemon is pinned to a stale secret in its LOADED launchd job definition — the value was removed from the .plist file but kickstart never re-reads it. Only a reboot (or bootout+bootstrap) clears it. health-monitor.log names the job and the variable."
 
-# ── Check serve is responding ──────────────────────────
-HEALTH=$(curl -s --max-time 5 http://localhost:3210/api/health 2>/dev/null)
-if echo "$HEALTH" | grep -q '"ok"'; then
-  clear_alert "API server not responding"
+# ── 0. Manual self-test ────────────────────────────────
+if [ -f "$HOME/.prime/health-selftest" ]; then
+  rm -f "$HOME/.prime/health-selftest"
+  log "self-test requested — pinging all alert channels"
+  npx tsx scripts/prime-alert.ts "Self-test $(date '+%H:%M') — alert channels are working." >> "$LOG" 2>&1
+fi
+
+# ── 1. serve API responding ────────────────────────────
+if curl -s --max-time 6 http://localhost:3210/api/health 2>/dev/null | grep -q '"ok"'; then
+  clear_alert "$MSG_SERVE"
 else
-  log "API not responding — restarting serve daemon..."
-  launchctl unload ~/Library/LaunchAgents/com.prime-recall.serve.plist 2>/dev/null
-  sleep 2
-  launchctl load ~/Library/LaunchAgents/com.prime-recall.serve.plist 2>/dev/null
-  sleep 5
-  HEALTH2=$(curl -s --max-time 5 http://localhost:3210/api/health 2>/dev/null)
-  if echo "$HEALTH2" | grep -q '"ok"'; then
-    log "✓ API server recovered"
-    clear_alert "API server not responding"
+  log "serve API not responding — restarting com.prime-recall.serve"
+  restart_daemon "com.prime-recall.serve"
+  sleep 8
+  if curl -s --max-time 6 http://localhost:3210/api/health 2>/dev/null | grep -q '"ok"'; then
+    log "✓ serve recovered"
+    clear_alert "$MSG_SERVE"
   else
-    alert "API server won't restart. Port 3210 may be in use."
+    alert "$MSG_SERVE"
     ISSUES=$((ISSUES + 1))
   fi
 fi
 
-# ── Check sync freshness ──────────────────────────────
-check_sync() {
-  local SOURCE=$1
-  local MAX_HOURS=$2
-  local LAST=$(sqlite3 ~/.prime/prime.db "SELECT last_sync_at FROM sync_state WHERE source='$SOURCE'" 2>/dev/null)
-  if [ -z "$LAST" ]; then return; fi
+# ── 2. Claude auth via proxy ───────────────────────────
+# The proxy now runs ONE claude child at a time; a probe sent mid-agent-run
+# queues behind a 5-15 min session and times out as a false failure. If a
+# claude child is alive, the proxy is self-evidently up and authed — skip.
+if pgrep -f "/opt/homebrew/bin/claude" >/dev/null 2>&1; then
+  log "claude busy with an agent run — skipping auth probe"
+else
+AUTH=$(curl -s --max-time 45 -X POST http://127.0.0.1:3211/claude \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Reply with exactly: OK","timeout":35}' 2>/dev/null)
+if echo "$AUTH" | grep -qE '"exit_code":0'; then
+  clear_alert "$MSG_AUTH"; clear_alert "$MSG_PROXY"; clear_alert "$MSG_QUOTA"
+elif echo "$AUTH" | grep -qiE "401|authenticate|Invalid authentication"; then
+  alert "$MSG_AUTH"
+  ISSUES=$((ISSUES + 1))
+elif echo "$AUTH" | grep -qi "proxy busy"; then
+  # The one-claude-at-a-time gate is held by a long agent run; the proxy itself
+  # is healthy. Restarting here would kill that agent for nothing — same
+  # reasoning as the quota branch below. The pgrep guard above misses the race
+  # where an agent starts between the guard and this curl.
+  log "claude-proxy busy with a long agent run — auth probe deferred"
+elif echo "$AUTH" | grep -qiE "usage limit|rate.?limit|overloaded|resets at"; then
+  # Quota exhaustion is NOT a proxy failure — restarting would kill any
+  # in-flight agent session for nothing (audit finding 2026-08-31).
+  log "Claude quota/rate limit hit — not restarting proxy"
+  alert "$MSG_QUOTA"
+  ISSUES=$((ISSUES + 1))
+else
+  log "claude-proxy no/odd response — restarting"
+  restart_daemon "com.prime.claude-proxy"
+  sleep 6
+  AUTH2=$(curl -s --max-time 45 -X POST http://127.0.0.1:3211/claude -H "Content-Type: application/json" \
+    -d '{"prompt":"Reply with exactly: OK","timeout":35}' 2>/dev/null)
+  if echo "$AUTH2" | grep -qE '"exit_code":0'; then
+    log "✓ claude-proxy recovered"; clear_alert "$MSG_PROXY"
+  else
+    alert "$MSG_PROXY"
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
+fi  # end busy-skip guard
 
-  local AGE_HOURS=$(python3 -c "
+# ── 2b. Agents can actually use MCP tools (hourly) ─────
+if [ "$(date +%M)" -lt 5 ]; then
+# Same busy-skip as §2: a probe queued behind a 15-min agent is not a tool test.
+if pgrep -f "/opt/homebrew/bin/claude" >/dev/null 2>&1; then
+  log "claude busy with an agent run — skipping MCP tool probe"
+else
+  TOOLS=$(curl -s --max-time 150 -X POST http://127.0.0.1:3211/claude \
+    -H "Content-Type: application/json" \
+    -d '{"prompt":"Call the prime_status MCP tool and reply with ONLY the total knowledge item count as a number. If the tool is unavailable reply exactly: NO_TOOLS","timeout":120}' 2>/dev/null)
+  # Parse the JSON and test only the result field — digits in the JSON
+  # wrapper (session ids) made the old grep false-pass (audit finding).
+  if echo "$TOOLS" | grep -qi "proxy busy"; then
+    log "MCP tool probe deferred — proxy busy with a long agent run"
+  elif echo "$TOOLS" | grep -qE '"error":"timeout after ([0-9]|[0-9][0-9]|1[01][0-9])s"'; then
+    # The proxy charges gate-queue time against the run (remainingBudget), so an
+    # agent that starts between pgrep and curl leaves the probe a few seconds to
+    # run claude and it 504s — "timeout after 4s" raised this alert on
+    # 2026-09-10 while every agent was calling prime tools. Only a 504 with the
+    # full 120s budget means claude itself hung.
+    log "MCP tool probe deferred — queued behind an agent, $(echo "$TOOLS" | cut -c1-60)"
+  elif echo "$TOOLS" | python3 -c '
+import json, sys, re
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(1)
+r = str(d.get("result", ""))
+sys.exit(0 if d.get("exit_code") == 0 and "NO_TOOLS" not in r and re.search(r"[0-9]{3,}", r) else 1)
+' 2>/dev/null; then
+    clear_alert "$MSG_TOOLS"
+  else
+    alert "$MSG_TOOLS"
+    ISSUES=$((ISSUES + 1))
+  fi
+fi  # end busy-skip guard
+fi
+
+# ── 3. shift daemon alive ──────────────────────────────
+if pgrep -f "index.ts shift" >/dev/null 2>&1; then
+  clear_alert "$MSG_SHIFT"
+else
+  log "shift daemon down — restarting"
+  restart_daemon "com.prime.shift"
+  sleep 5
+  if pgrep -f "index.ts shift" >/dev/null 2>&1; then
+    log "✓ shift recovered"; clear_alert "$MSG_SHIFT"
+  else
+    alert "$MSG_SHIFT"
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
+
+# ── 4. (retired 2026-08-31) The /api/briefing artifact was a second, unread
+#      briefing generator; Quinn's daily email is THE brief. Its freshness
+#      check (4b) is the only brief check now. /api/briefing stays on-demand.
+clear_alert "$MSG_BRIEF"
+
+# ── 4b. Morning brief actually went out ────────────────
+# The brief is Zach's single surface — if it silently fails, a broken day
+# looks identical to a quiet one. Alert if nothing sent by 8am local.
+MSG_NOBRIEF="Morning brief did not go out by 9:30 — daily email pipeline is broken."
+HOUR_NOW=$(date +%H)
+MIN_NOW=$(date +%M)
+DOW_NOW=$(date +%u)  # 6=Sat 7=Sun — weekends have no brief by design
+# 9:30 gate: with 7 sequential Opus PMs a 7:08 cycle can block ticks until
+# ~8:40; alerting at 8:00 would false-alarm near-daily (audit 2026-08-31).
+if [ "$DOW_NOW" -lt 6 ] && { [ "$HOUR_NOW" -gt 9 ] || { [ "$HOUR_NOW" -eq 9 ] && [ "$MIN_NOW" -ge 30 ]; }; } && [ "$HOUR_NOW" -lt 22 ]; then
+  LAST_QE=$(sqlite3 "$DB" "SELECT value FROM graph_state WHERE key='last_quinn_email'" 2>/dev/null | tr -d '"')
+  TODAY_LOCAL=$(date +%Y-%m-%d)
+  SENT_DAY=$(python3 -c "
+from datetime import datetime, timezone
+import sys
+try:
+    d = datetime.fromisoformat('${LAST_QE}'.replace('Z','+00:00'))
+    print(d.astimezone().strftime('%Y-%m-%d'))
+except Exception:
+    print('never')
+" 2>/dev/null)
+  if [ "$SENT_DAY" = "$TODAY_LOCAL" ]; then
+    clear_alert "$MSG_NOBRIEF"
+  else
+    alert "$MSG_NOBRIEF"
+    ISSUES=$((ISSUES + 1))
+  fi
+else
+  clear_alert "$MSG_NOBRIEF"
+fi
+
+# ── 5. Source sync freshness ───────────────────────────
+check_sync() {  # source  max_hours
+  local LAST MSG
+  MSG="$1 sync has not completed successfully in over ${2}h — connector or token may be broken."
+  LAST=$(sqlite3 "$DB" "SELECT last_sync_at FROM sync_state WHERE source='$1'" 2>/dev/null)
+  [ -z "$LAST" ] && LAST=$(sqlite3 "$DB" "SELECT MAX(created_at) FROM knowledge WHERE source='$1'" 2>/dev/null)
+  [ -z "$LAST" ] && return
+  local AGE
+  AGE=$(python3 -c "
 from datetime import datetime, timezone
 last = datetime.fromisoformat('${LAST}'.replace(' ', 'T'))
 if last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)
-age = (datetime.now(timezone.utc) - last).total_seconds() / 3600
-print(int(age))
+print(int((datetime.now(timezone.utc) - last).total_seconds() / 3600))
 " 2>/dev/null)
-
-  if [ -n "$AGE_HOURS" ] && [ "$AGE_HOURS" -gt "$MAX_HOURS" ]; then
-    alert "$SOURCE sync is ${AGE_HOURS}h stale (limit: ${MAX_HOURS}h). Token may be expired."
+  if [ -n "$AGE" ] && [ "$AGE" -gt "$2" ]; then
+    log "$1 sync stale: last success ${AGE}h ago (limit ${2}h)"
+    alert "$MSG"
     ISSUES=$((ISSUES + 1))
   else
-    clear_alert "$SOURCE sync is"
+    clear_alert "$MSG"
   fi
 }
+check_sync "gmail" 6
+check_sync "calendar" 12
+check_sync "claude-code" 12
+check_sync "fireflies" 96
 
-check_sync "gmail" 1           # Gmail should sync within 1 hour
-check_sync "calendar" 1        # Calendar within 1 hour
-check_sync "claude" 2          # Claude.ai within 2 hours
-check_sync "cowork" 24         # Cowork within 24 hours
-check_sync "otter" 72          # Otter within 3 days
-check_sync "fireflies" 72      # Fireflies within 3 days
+# ── 6. DB integrity ────────────────────────────────────
+INTEG=$(sqlite3 "$DB" "PRAGMA quick_check" 2>/dev/null | head -1)
+if [ "$INTEG" = "ok" ]; then
+  clear_alert "$MSG_DB"
+else
+  log "DB integrity: $INTEG"
+  alert "$MSG_DB"
+  ISSUES=$((ISSUES + 1))
+fi
 
-# ── Check DB integrity ─────────────────────────────────
-INTEGRITY=$(sqlite3 ~/.prime/prime.db "PRAGMA integrity_check" 2>/dev/null)
-if [ "$INTEGRITY" != "ok" ]; then
-  alert "Database corruption detected: $INTEGRITY"
+# ── 7. Disk space ──────────────────────────────────────
+FREE=$(df -g "$HOME" | tail -1 | awk '{print $4}')
+if [ -n "$FREE" ] && [ "$FREE" -lt 5 ]; then
+  log "disk free: ${FREE}GB"
+  alert "$MSG_DISK"
   ISSUES=$((ISSUES + 1))
 else
-  clear_alert "Database corruption"
+  clear_alert "$MSG_DISK"
 fi
 
-# ── Check disk space ───────────────────────────────────
-DISK_FREE=$(df -g ~ | tail -1 | awk '{print $4}')
-if [ "$DISK_FREE" -lt 5 ]; then
-  alert "Low disk space: ${DISK_FREE}GB free"
-  ISSUES=$((ISSUES + 1))
-fi
-
-# ── Check tunnel ───────────────────────────────────────
-TUNNEL_PID=$(pgrep -f "cloudflared tunnel" 2>/dev/null)
-if [ -z "$TUNNEL_PID" ]; then
-  log "Tunnel not running — restarting..."
-  launchctl unload ~/Library/LaunchAgents/com.prime-recall.tunnel.plist 2>/dev/null
-  launchctl load ~/Library/LaunchAgents/com.prime-recall.tunnel.plist 2>/dev/null
-  clear_alert "Tunnel down"
-fi
-
-# ── Check dream pipeline freshness ─────────────────────
-LAST_DREAM=$(sqlite3 ~/.prime/prime.db "SELECT value FROM graph_state WHERE key='last_dream_run'" 2>/dev/null)
-if [ -n "$LAST_DREAM" ]; then
-  DREAM_AGE=$(python3 -c "
-from datetime import datetime, timezone
-last = datetime.fromisoformat('${LAST_DREAM}'.replace('\"',''))
-if last.tzinfo is None: last = last.replace(tzinfo=timezone.utc)
-age = (datetime.now(timezone.utc) - last).total_seconds() / 3600
-print(int(age))
-" 2>/dev/null)
-  if [ -n "$DREAM_AGE" ] && [ "$DREAM_AGE" -gt 36 ]; then
-    alert "Dream pipeline hasn't run in ${DREAM_AGE}h. Cron job may be broken."
+# ── 7b. DeepSeek API balance ───────────────────────────
+DS_KEY=$(grep '^DEEPSEEK_API_KEY=' "$PRIME_DIR/.env" 2>/dev/null | cut -d= -f2-)
+if [ -n "$DS_KEY" ]; then
+  DS_BAL=$(printf 'header = "Authorization: Bearer %s"\n' "$DS_KEY" | curl -s --max-time 10 -K - https://api.deepseek.com/user/balance 2>/dev/null)
+  if echo "$DS_BAL" | grep -q '"is_available":true'; then
+    clear_alert "$MSG_DEEPSEEK"
+    BAL_NOW=$(echo "$DS_BAL" | python3 -c "import sys,json;print(json.load(sys.stdin)['balance_infos'][0]['total_balance'])" 2>/dev/null)
+    [ -n "$BAL_NOW" ] && log "deepseek balance: \$$BAL_NOW"
+    # Burn-rate breaker: >$0.50 drop per 5-min sample, 3 consecutive => runaway
+    STATE="$HOME/.prime/burn-state"
+    PREV=$(cat "$STATE" 2>/dev/null | head -1); STREAK=$(cat "$STATE" 2>/dev/null | sed -n 2p)
+    if [ -n "$BAL_NOW" ] && [ -n "$PREV" ]; then
+      DROP=$(python3 -c "print(1 if (float('$PREV') - float('$BAL_NOW')) > 0.50 else 0)" 2>/dev/null)
+      if [ "$DROP" = "1" ]; then STREAK=$((${STREAK:-0} + 1)); else STREAK=0; fi
+      if [ "$STREAK" -ge 3 ]; then
+        sqlite3 "$DB" "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('llm_kill_switch','1',datetime('now'))" 2>/dev/null
+        alert "$MSG_BURN"
+      fi
+    fi
+    printf '%s\n%s\n' "$BAL_NOW" "${STREAK:-0}" > "$STATE"
+  else
+    alert "$MSG_DEEPSEEK"
     ISSUES=$((ISSUES + 1))
   fi
 fi
 
-# ── Summary ────────────────────────────────────────────
+# ── 7c. Monitor roster sanity ──────────────────────────
+ACTIVE_PMS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pm_agents WHERE active=1" 2>/dev/null)
+if [ -n "$ACTIVE_PMS" ] && [ "$ACTIVE_PMS" -gt 0 ]; then
+  clear_alert "$MSG_MONITORS"
+else
+  alert "$MSG_MONITORS"
+  ISSUES=$((ISSUES + 1))
+fi
+
+# ── 7d. Stale launchd job environment ──────────────────
+# A secret deleted from a .plist survives in the LOADED job definition:
+# `kickstart -k` respawns the process but never re-reads the file, so a
+# daemon can stay pinned to a rotated/revoked value indefinitely while the
+# file on disk looks clean. Bit serve and tunnel (DEEPSEEK_API_KEY, both
+# 2026-09-09); the mechanism is generic to any variable.
+# Rule: a var in the loaded `environment` block that the plist does not set
+# is stale unless its value still agrees with .env. Values are compared in
+# shell vars and only ever logged as a 4-char tail — never in full, never in argv.
+STALE_ENV=0
+for LBL in $(launchctl list | awk '$3 ~ /^com\.prime/ {print $3}'); do
+  PRINT=$(launchctl print "gui/$UID_Z/$LBL" 2>/dev/null)
+  [ -n "$PRINT" ] || continue
+  PLIST=$(echo "$PRINT" | awk -F' = ' '/^[[:space:]]+path = /{print $2; exit}')
+  PLIST_KEYS=""
+  if [ -n "$PLIST" ] && [ -f "$PLIST" ]; then
+    PLIST_KEYS=$(plutil -extract EnvironmentVariables json -o - "$PLIST" 2>/dev/null \
+      | python3 -c "import sys,json;print(' '.join(json.load(sys.stdin)))" 2>/dev/null)
+  fi
+  while IFS= read -r LINE; do
+    VAR="${LINE%% => *}"; VAL="${LINE#* => }"
+    # XPC_SERVICE_NAME is injected by launchd itself; plist-set vars are legitimate.
+    case " XPC_SERVICE_NAME $PLIST_KEYS " in *" $VAR "*) continue;; esac
+    ENVVAL=$(grep "^${VAR}=" "$PRIME_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+    if [ -n "$ENVVAL" ] && [ "$ENVVAL" = "$VAL" ]; then
+      log "launchd env: $LBL sets $VAR outside its plist but the value still matches .env — harmless"
+    else
+      STALE_ENV=1
+      log "launchd env: $LBL is pinned to $VAR (...${VAL: -4}) — not in its plist, disagrees with .env"
+    fi
+  done < <(echo "$PRINT" | sed -n '/^[[:space:]]*environment = {/,/^[[:space:]]*}/p' \
+            | sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\) => \(.*\)$/\1 => \2/p')
+done
+if [ "$STALE_ENV" -eq 1 ]; then
+  alert "$MSG_STALEENV"
+  ISSUES=$((ISSUES + 1))
+else
+  clear_alert "$MSG_STALEENV"
+fi
+
+# ── 7e. GitHub has moved on without this machine (hourly) ──
+# shift's auto-push only pushes, never pulls, and discarded git's stderr until
+# 2026-09-10. A laptop commit (5b6cb67, 2026-04-27) this tree never pulled made
+# every push after it a non-fast-forward reject, so every commit from
+# 2026-07-09 on stayed on this Mac Mini only. While GitHub's main is not in
+# local main, no push can land until someone merges it.
+MSG_PUSH="GitHub main has commits this Mac Mini never pulled, so the shift auto-push is rejected every cycle and this machine's commits are not reaching GitHub. Fix: cd ~/GitHub/prime && git pull --no-rebase --no-edit origin main && git push origin main"
+if [ "$(date +%M)" -lt 5 ]; then
+  REMOTE_MAIN=$(GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
+  if [ -z "$REMOTE_MAIN" ]; then
+    log "git: could not read GitHub main (network or auth) — push check skipped"
+  elif git merge-base --is-ancestor "$REMOTE_MAIN" main 2>/dev/null; then
+    clear_alert "$MSG_PUSH"
+  else
+    log "git: GitHub main ${REMOTE_MAIN:0:7} is not in local main; $(git rev-list --count main --not "$REMOTE_MAIN" 2>/dev/null || echo '?') local commits cannot be pushed"
+    alert "$MSG_PUSH"
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
+
+# ── 8. Tunnel (best-effort restart, no alert) ──────────
+if ! pgrep -f "cloudflared" >/dev/null 2>&1; then
+  log "tunnel down — restarting"; restart_daemon "com.prime-recall.tunnel"
+fi
+
+# ── 9. Mechanic dispatch ───────────────────────────────
+# Alerts still present after 15 min (3 checks) are handed to the repair agent;
+# so are issues Quinn filed via prime_report_issue. mechanic.sh has its own
+# single-flight lock, per-issue cooldown, and attempt cap.
+MECH="$PRIME_DIR/scripts/mechanic.sh"
+if [ -x "$MECH" ]; then
+  NOW=$(date +%s)
+  for f in "$ALERT_DIR"/*; do
+    [ -f "$f" ] || continue
+    case "$f" in *.dispatched) continue;; esac
+    # Legacy zero-byte markers carry no message and silence future alerts
+    # for their hash — remove them (audit finding 2026-08-31).
+    [ -s "$f" ] || { rm -f "$f"; continue; }
+    # Brief-timing alerts are watchdog-only — a mechanic session cannot fix
+    # "the cycle is slow" and would poke the system mid-cycle (audit finding)
+    grep -q "Morning brief did not go out" "$f" 2>/dev/null && continue
+    # Stale launchd env needs bootout+bootstrap or a reboot — outside the
+    # mechanic's walls, and the alert already carries the fix for Zach.
+    grep -q "LOADED launchd job definition" "$f" 2>/dev/null && continue
+    # Reconciling with GitHub means a merge + push — the mechanic may not push,
+    # and the alert already carries the commands for Zach.
+    grep -q "shift auto-push is rejected" "$f" 2>/dev/null && continue
+    AGE=$(( NOW - $(stat -f %m "$f") ))
+    [ "$AGE" -ge 900 ] || continue
+    if [ -f "$f.dispatched" ] && [ $(( NOW - $(stat -f %m "$f.dispatched") )) -lt 21600 ]; then continue; fi
+    touch "$f.dispatched"
+    log "mechanic ← watchdog: $(head -c 100 "$f")"
+    nohup bash "$MECH" watchdog "$(cat "$f")" >/dev/null 2>&1 &
+  done
+  # Quinn-filed issues: newline-flattened (multi-line observations broke the
+  # line-based read), never-attempted first so stuck issues can't starve new ones.
+  sqlite3 "$DB" "SELECT id || '|' || replace(replace(observation,char(10),' '),char(13),' ') || ' — evidence: ' || replace(replace(COALESCE(why_wrong,''),char(10),' '),char(13),' ') FROM system_issues WHERE status='open' ORDER BY (result_status IS NULL) DESC, created_at ASC LIMIT 3" 2>/dev/null | while IFS='|' read -r IID ITEXT; do
+    [ -n "$IID" ] || continue
+    log "mechanic ← quinn issue ${IID:0:8}: $(echo "$ITEXT" | head -c 100)"
+    nohup bash "$MECH" quinn "$ITEXT" "$IID" >/dev/null 2>&1 &
+    sleep 1
+  done
+fi
+
 if [ "$ISSUES" -eq 0 ]; then
-  log "✓ All systems healthy"
+  log "✓ all systems healthy"
+else
+  log "$ISSUES unresolved issue(s)"
 fi

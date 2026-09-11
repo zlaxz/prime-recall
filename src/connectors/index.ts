@@ -23,8 +23,10 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
   if (saConfig) {
     try {
       const { items } = await scanGmail(db, {
-        days: 400,
-        maxThreads: 500,
+        // 400d/500-thread window re-fed every failed/noise thread to the
+        // extractor every 15 minutes — the $86/day DeepSeek burn (2026-09-08).
+        days: 14,
+        maxThreads: 150,
         sourceAccount: gmailEmail as string,
         useServiceAccount: true,
       });
@@ -140,12 +142,36 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
     }
   }
 
-  // Gmail Sent — DISABLED. scanSentMail is OAuth-only and the OAuth tokens were
-  // bound to quinn@ (the system email), not Zach's inbox — using it caused 10
-  // days of email to be ingested against the wrong account. Re-enable only after
-  // scanSentMail is updated to support service-account auth (feedback memory:
-  // gmail_service_account). Service-account Gmail scan above already covers
-  // received-mail; sent-mail correction tags are deferred.
+  // Gmail Sent — re-enabled 2026-08-31: scanSentMail now uses the service
+  // account impersonating Zach's mailbox (the OAuth-bound-to-quinn@ bug is
+  // gone). Incremental 2-day window per tick. This is what makes ledger
+  // closure-by-observation real: monitors see Zach's actual sent mail.
+  try {
+    const { scanSentMail } = await import('./gmail.js');
+    const sent = await scanSentMail(db, { days: 2, maxThreads: 50 });
+    if (sent.newItems || sent.corrected) console.log(`  Sent-mail: ${sent.newItems} new, ${sent.corrected} corrected`);
+  } catch (err: any) {
+    console.log('  Sent-mail scan failed: ' + (err.message || '').slice(0, 80));
+  }
+
+  // Attachment INDEX CARDS only (library metaphor): filename/sender/thread ids,
+  // never content. Bytes fetched on demand via prime_read_attachment.
+  try {
+    const { indexAttachments } = await import('../attachments.js');
+    const att = await indexAttachments(db, { days: 2, max: 40 });
+    if (att.indexed) console.log(`  Attachments: ${att.indexed} new index cards (${att.scanned} messages scanned)`);
+  } catch (err: any) {
+    console.log('  Attachment index failed: ' + (err.message || '').slice(0, 80));
+  }
+
+  // Zach's replies to Prime's emails (yes/no #n, done, skip, free text) — inbound only
+  try {
+    const { processReplies } = await import('../reply-handler.js');
+    const rep = await processReplies(db);
+    if (rep.handled) console.log(`  Replies: ${rep.handled} handled`);
+  } catch (err: any) {
+    console.log('  Reply handler failed: ' + (err.message || '').slice(0, 80));
+  }
 
     // ── TEAM MEMBER SYNC (via service account) ──
   // Sync Gmail + Calendar for non-CEO team members using domain-wide delegation
@@ -158,8 +184,8 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
       if (member.sync_gmail) {
         try {
           const { items } = await scanGmail(db, {
-            days: 400,
-            maxThreads: 500,
+            days: 14,
+            maxThreads: 100,
             sourceAccount: member.email,
             useServiceAccount: true,
           });
@@ -169,19 +195,9 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
         }
       }
 
-      if (member.sync_calendar) {
-        try {
-          const { scanCalendarForAccount } = await import('./calendar.js');
-          if (typeof scanCalendarForAccount === 'function') {
-            const { items } = await scanCalendarForAccount(db, member.email);
-            results.push({ source: `calendar:${member.name}`, items });
-          }
-
-        } catch (err: any) {
-          results.push({ source: `calendar:${member.name}`, items: 0, error: err.message?.slice(0, 80) });
-        }
-      }
-    
+      // Per-account calendar sync (scanCalendarForAccount) was never implemented —
+      // scanCalendar only supports the CEO's own shared OAuth tokens, not team
+      // member service accounts. member.sync_calendar is a no-op until that lands.
 
       if (member.sync_drive) {
         try {

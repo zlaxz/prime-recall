@@ -161,7 +161,7 @@ export async function scanGmail(
   const afterEpoch = Math.floor(afterDate.getTime() / 1000);
 
   // Fetch threads with pagination to capture everything in the date range
-  const query = `after:${afterEpoch} -category:promotions -category:social -category:updates -category:forums -from:noreply -from:no-reply -from:notifications -from:mailer -from:newsletter -from:digest -from:marketing -from:support -from:donotreply -from:info@ -from:quinn@recaptureinsurance.com -from:prime@recaptureinsurance.com`;
+  const query = `after:${afterEpoch} -category:promotions -category:social -category:updates -category:forums -from:noreply -from:no-reply -from:notifications -from:mailer -from:newsletter -from:digest -from:marketing -from:support -from:donotreply -from:info@`;
   const threads: { id: string; historyId?: string }[] = [];
   let pageToken: string | undefined;
 
@@ -288,13 +288,13 @@ export async function scanGmail(
         subject: td.subject,
         last_from: td.lastFrom,
         days_since_last: td.lastDate ? Math.floor((Date.now() - new Date(td.lastDate).getTime()) / 86400000) : 0,
-        waiting_on_user: !isSelfSender(td.lastFrom),
+        waiting_on_user: !td.lastFrom.toLowerCase().includes(userEmail.toLowerCase()),
         updated_for_reply: true,
       };
 
       // Update tags: if latest message is not from user, mark awaiting_reply
       const existingTags = typeof meta.tags === 'string' ? JSON.parse(meta.tags || '[]') : [];
-      const lastFromIsUser = isSelfSender(td.lastFrom);
+      const lastFromIsUser = td.lastFrom.toLowerCase().includes(userEmail.toLowerCase());
       let newTags = (Array.isArray(existingTags) ? existingTags : []).filter((t: string) => t !== 'awaiting_reply');
       if (!lastFromIsUser) newTags.push('awaiting_reply');
 
@@ -315,36 +315,13 @@ export async function scanGmail(
     console.log(`  Updated ${updatedThreads} threads with new replies`);
   }
 
-  // Threads the AI classified as noise produce no knowledge row, so the dedup
-  // below could never skip them — they were re-extracted every single tick.
-  // Record them here instead, keyed on message_count so a genuine reply reopens
-  // the thread for extraction.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS gmail_noise_threads (
-      thread_id TEXT NOT NULL,
-      source_account TEXT NOT NULL,
-      message_count INTEGER,
-      subject TEXT,
-      last_date TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      PRIMARY KEY (thread_id, source_account)
-    );
-  `);
-
   // Dedup: skip threads already in the knowledge base
   const beforeDedup = threadData.length;
-  let skippedNoise = 0;
   const deduped = threadData.filter(td => {
     const sourceAccount = options.sourceAccount || userEmail;
       const existing = db.prepare('SELECT id FROM knowledge WHERE source_ref = ? AND (source_account = ? OR source_account IS NULL)').get(`thread:${td.id}`, sourceAccount);
-    if (existing) return false;
-    const known = db.prepare('SELECT message_count FROM gmail_noise_threads WHERE thread_id = ? AND source_account = ?').get(td.id, sourceAccount) as { message_count: number } | undefined;
-    if (known && known.message_count >= td.messageCount) { skippedNoise++; return false; }
-    return true;
+    return !existing;
   });
-  if (skippedNoise > 0) {
-    console.log(`  Skipping ${skippedNoise} known-noise threads (no new messages)`);
-  }
   if (beforeDedup - deduped.length > 0) {
     console.log(`  Skipping ${beforeDedup - deduped.length} already indexed threads`);
   }
@@ -384,19 +361,10 @@ export async function scanGmail(
   }
 
   // Phase 2: AI extraction in parallel (Claude Code CLI calls)
-  // Hard per-scan AI budget: whatever upstream filtering misses, one scan may
-  // never hand the extractor an unbounded queue again.
-  const MAX_AI_EXTRACTIONS_PER_SCAN = 40;
-  if (threadData.length > MAX_AI_EXTRACTIONS_PER_SCAN) {
-    console.log(`  Extraction budget: ${threadData.length} candidates capped at ${MAX_AI_EXTRACTIONS_PER_SCAN} (rest next tick)`);
-    threadData.length = MAX_AI_EXTRACTIONS_PER_SCAN;
-  }
   console.log(`  Extracting intelligence (${CONCURRENCY} concurrent)...`);
   let extracted = 0;
-  let scanDegraded = false; // first 402 stops all further paid calls this scan
 
   async function processThread(td: typeof threadData[0]) {
-    if (scanDegraded) return false;
     try {
       // Use V2 provenance extraction, fall back to V1
       let extV2;
@@ -406,30 +374,16 @@ export async function scanGmail(
         extV2 = null;
       }
       const ext = extV2 ? toV1(extV2) : await extractIntelligence(td.content, apiKey);
+      const embText = `${ext.title}\n${ext.summary}`;
+      const embedding = await generateEmbedding(embText, apiKey);
 
-      const lastFromIsUser = isSelfSender(td.lastFrom);
+      const lastFromIsUser = td.lastFrom.toLowerCase().includes(userEmail.toLowerCase());
       const daysSinceLastMessage = Math.floor((Date.now() - new Date(td.lastDate).getTime()) / 86400000);
 
       // Skip noise items (extraction identified as automated/marketing)
-      // Checked before embedding so noise doesn't cost an embedding call too.
       if (ext.tags?.includes('noise') || ext.title === '[NOISE]') {
-        console.log(`    ai-noise: "${td.subject.slice(0, 50)}"`);
-        // This insert failing silently meant noise threads were re-extracted
-        // every tick forever (gmail_noise_threads had ZERO rows on 2026-09-08).
-        try {
-          let lastIso: string | null = null;
-          try { lastIso = td.lastDate ? new Date(td.lastDate).toISOString() : null; } catch (_e) {}
-          db.prepare(
-            'INSERT OR REPLACE INTO gmail_noise_threads (thread_id, source_account, message_count, subject, last_date) VALUES (?, ?, ?, ?, ?)'
-          ).run(td.id, options.sourceAccount || userEmail, td.messageCount ?? 0, td.subject ?? '', lastIso);
-        } catch (markErr: any) {
-          console.error(`    noise-mark FAILED for ${td.id}: ${String(markErr?.message || markErr).slice(0, 120)}`);
-        }
         return;
       }
-
-      const embText = `${ext.title}\n${ext.summary}`;
-      const embedding = await generateEmbedding(embText, apiKey);
 
       let importance = ext.importance;
       if (!lastFromIsUser && daysSinceLastMessage > 7) {
@@ -480,13 +434,7 @@ export async function scanGmail(
         process.stdout.write(`\r  Extracted: ${extracted}/${threadData.length}`);
       }
       return true;
-    } catch (err: any) {
-      if (/402|Insufficient Balance/i.test(String(err?.message))) {
-        if (!scanDegraded) console.error('    402 — balance dead; degrading scan (no further paid calls this tick)');
-        scanDegraded = true;
-      } else console.error(`    thread ${td.id} FAILED: ${err.message}`);
-      return false;
-    }
+    } catch { return false; }
   }
 
   // Run with concurrency limiter
@@ -520,15 +468,31 @@ export async function scanSentMail(
   const days = options.days || 90;
   const maxThreads = options.maxThreads || 300;
 
-  // scanSentMail is service-account only (2026-08-31): the OAuth tokens were
-  // bound to quinn@ and read the wrong mailbox for 10 days. The service account
-  // (domain-wide delegation) impersonates Zach's own mailbox directly — his
-  // SENT label is the same mailbox the inbox sync already reads. No routing
-  // rules, no mail copies: access was always there, this was a code choice.
-  const userEmail = 'zach.stock@recaptureinsurance.com';
-  const saAuth = getServiceAccountAuth(userEmail, ['https://www.googleapis.com/auth/gmail.readonly']);
-  if (!saAuth) throw new Error('Service account not configured for gmail.readonly');
-  const gmail = google.gmail({ version: 'v1', auth: saAuth });
+  const tokens = getConfig(db, 'gmail_tokens');
+  if (!tokens) throw new Error('Gmail not connected. Run: recall connect gmail');
+
+  const clientId = CLIENT_ID || getConfig(db, 'google_client_id') || '';
+  const clientSecret = CLIENT_SECRET || getConfig(db, 'google_client_secret') || '';
+  if (!clientId || !clientSecret) throw new Error('Google OAuth credentials missing.');
+
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI);
+  oauth2Client.setCredentials(tokens);
+
+  // Refresh token
+  oauth2Client.on('tokens', (newTokens) => {
+    const current = getConfig(db, 'gmail_tokens');
+    setConfig(db, 'gmail_tokens', { ...current, ...newTokens });
+  });
+  try {
+    const { credentials } = await oauth2Client.refreshAccessToken();
+    oauth2Client.setCredentials(credentials);
+    setConfig(db, 'gmail_tokens', credentials);
+  } catch (err: any) {
+    throw new Error(`Gmail token refresh failed: ${err.message}`);
+  }
+
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+  const userEmail = getConfig(db, 'gmail_email') || '';
 
   const afterDate = new Date(Date.now() - days * 86400000);
   const afterEpoch = Math.floor(afterDate.getTime() / 1000);
@@ -675,18 +639,9 @@ export async function scanSentMail(
     const sourceRef = `thread:${td.id}`;
     let existing = db.prepare('SELECT id, metadata, tags FROM knowledge WHERE source_ref = ?').get(sourceRef) as any;
     if (!existing && td.subject) {
-      // Fallback: match by subject in inbox items. Guarded (audit 2026-08-31):
-      // escape LIKE wildcards, require a distinctive subject, and skip when
-      // ambiguous — clearing waiting_on_user on the WRONG thread silently
-      // drops a genuinely-owed reply from the ball lists.
-      const stripped = td.subject.replace(/^(Re:|Fwd:)\s*/gi, '').trim().slice(0, 50);
-      if (stripped.length >= 20) {
-        const escaped = stripped.replace(/([%_\\])/g, '\\$1');
-        const matches = db.prepare("SELECT id, metadata, tags FROM knowledge WHERE source = 'gmail' AND title LIKE ? ESCAPE '\\' ORDER BY source_date DESC LIMIT 2")
-          .all(`%${escaped}%`) as any[];
-        if (matches.length === 1) existing = matches[0];
-        // 2 matches = ambiguous fallback — do nothing rather than guess
-      }
+      // Fallback: match by subject in inbox items
+      existing = db.prepare('SELECT id, metadata, tags FROM knowledge WHERE source = ? AND title LIKE ? ORDER BY source_date DESC LIMIT 1')
+        .get('gmail', `%${td.subject.replace(/^(Re:|Fwd:)\s*/gi, '').trim().slice(0, 50)}%`) as any;
     }
 
     if (existing && td.userSentLast) {
@@ -733,20 +688,8 @@ export async function scanSentMail(
     if (existing.source === 'gmail' && td.lastDate) {
       const kbDate = new Date(existing.source_date).getTime();
       const threadDate = new Date(td.lastDate).getTime();
-      if (threadDate > kbDate + 60000) {
-        // light-touch UPDATE (audit 2026-08-31): recreating via insertKnowledge
-        // REPLACEd the rich extraction with a snippet row, nulled raw_content/
-        // created_at, and flipped source to gmail-sent — permanently removing
-        // the thread from ball-list queries. Refresh in place instead.
-        try {
-          const row = db.prepare('SELECT metadata FROM knowledge WHERE id = ?').get(existing.id) as any;
-          const meta = typeof row?.metadata === 'string' ? JSON.parse(row.metadata) : (row?.metadata || {});
-          const newMeta = { ...meta, waiting_on_user: false, user_replied: true, last_from: td.lastFrom,
-            replied_at: new Date(td.lastDate).toISOString() };
-          db.prepare("UPDATE knowledge SET source_date = ?, metadata = ?, updated_at = datetime('now') WHERE id = ?")
-            .run(new Date(td.lastDate).toISOString(), JSON.stringify(newMeta), existing.id);
-        } catch {}
-        return false;
+      if (threadDate > kbDate + 60000) { // Thread is newer by >1 min
+        return true; // Will upsert via insertKnowledge (source_ref match)
       }
     }
     return false;
@@ -774,7 +717,7 @@ export async function scanSentMail(
             title: extracted.title || `Sent: ${td.subject}`,
             summary: extracted.summary,
             source: 'gmail-sent',
-            source_account: userEmail,
+        source_account: options?.sourceAccount || userEmail,
             source_ref: `thread:${td.id}`,
             source_date: td.lastDate ? new Date(td.lastDate).toISOString() : undefined,
             contacts: extracted.contacts,
@@ -833,10 +776,6 @@ export async function scanSentMail(
 // Send Email — Execution Engine Phase A1
 // ============================================================
 
-// Zach's own sending identities — a self-forward is never "waiting on Zach"
-export const SELF_SENDER = /zach\.stock@recaptureinsurance|zstock@stockinsgroup|zstockco@gmail/i;
-export const isSelfSender = (from: string) => SELF_SENDER.test(String(from || ''));
-
 export async function sendEmail(
   db: Database.Database,
   options: {
@@ -848,42 +787,10 @@ export async function sendEmail(
     replyToThreadId?: string;  // reply to existing thread
     html?: boolean;
     from?: string;  // default: quinn@recaptureinsurance.com
-    inReplyTo?: string;  // RFC Message-ID of the mail being answered — threads in the RECIPIENT's mailbox
   }
 ): Promise<{ success: boolean; messageId?: string; threadId?: string; error?: string }> {
   // Use service account for sending (domain-wide delegation with gmail.send scope)
-  // Header values may originate from LLM output — CR/LF here is header
-  // injection (a newline in Subject can smuggle a Bcc). Audit 2026-08-31.
-  const cleanHeader = (v?: string) => (v || '').replace(/[\r\n]+/g, ' ').trim();
-  // Non-ASCII in a raw RFC2822 header renders as mojibake (Â· â€") in most
-  // clients — RFC 2047 encoded-words are required. Body is fine (charset=utf-8).
-  // RFC 2047 §2: each encoded-word ≤ 75 chars → chunk on character boundaries
-  const encodeHeader = (v: string) => {
-    if (!/[^\x20-\x7E]/.test(v)) return v;
-    const words: string[] = []; let chunk = '';
-    for (const ch of v) {
-      if (Buffer.byteLength(chunk + ch, 'utf-8') > 45) { words.push(chunk); chunk = ''; }
-      chunk += ch;
-    }
-    if (chunk) words.push(chunk);
-    return words.map(w => '=?UTF-8?B?' + Buffer.from(w, 'utf-8').toString('base64') + '?=').join('\r\n ');
-  };
-  options = { ...options, to: cleanHeader(options.to), subject: cleanHeader(options.subject),
-    cc: options.cc ? cleanHeader(options.cc) : undefined, bcc: options.bcc ? cleanHeader(options.bcc) : undefined };
   const fromEmail = options.from || 'quinn@recaptureinsurance.com';
-  // Email budget: one choke point for everything Prime sends Zach (2026-09-01,
-  // "too many emails"). Held messages are logged; the brief reports the count.
-  const zachOnly = /zach\.stock@recaptureinsurance/i.test(options.to) && !/,/.test(options.to);
-  if (zachOnly) {
-    try {
-      const { emailBudgetAllows } = await import('../email-budget.js');
-      const verdict = emailBudgetAllows(db, options.subject, options.inReplyTo);
-      if (!verdict.allowed) {
-        console.log(`[email-budget] HELD (${verdict.reason}): ${options.subject.slice(0, 80)}`);
-        return { success: false, error: `held by email budget: ${verdict.reason}` };
-      }
-    } catch (e: any) { console.log('[email-budget] check failed, sending: ' + (e?.message || e)); }
-  }
   const saAuth = getServiceAccountAuth(fromEmail, ['https://www.googleapis.com/auth/gmail.send']);
   if (!saAuth) {
     return { success: false, error: 'Service account not configured for gmail.send' };
@@ -900,9 +807,7 @@ export async function sendEmail(
     `To: ${options.to}`,
     options.cc ? `Cc: ${options.cc}` : null,
     options.bcc ? `Bcc: ${options.bcc}` : null,
-    `Subject: ${encodeHeader(options.subject)}`,
-    options.inReplyTo ? `In-Reply-To: ${cleanHeader(options.inReplyTo)}` : null,
-    options.inReplyTo ? `References: ${cleanHeader(options.inReplyTo)}` : null,
+    `Subject: ${options.subject}`,
     'MIME-Version: 1.0',
     `Content-Type: ${contentType}; charset=utf-8`,
   ].filter(h => h !== null).join('\r\n');
@@ -922,11 +827,7 @@ export async function sendEmail(
     });
 
     // Log the sent email — but mark system-sent emails as derived to prevent contamination
-    // System emails ([ACT]/[REMIND]/[PRIME HEALTH]/MECHANIC/briefs to Zach) must NOT be
-    // logged as primary gmail-sent — monitors search gmail-sent for closure evidence,
-    // and Quinn's own alert about an action must never count as the action (audit 2026-08-31).
-    // Anything quinn@ sends to Zach alone is a system email — never closure evidence
-    const isSystemEmail = fromEmail === 'quinn@recaptureinsurance.com' && /zach\.stock@recaptureinsurance/i.test(options.to) && !/,/.test(options.to);
+    const isSystemEmail = options.to.includes('zach.stock@recaptureinsurance') && options.subject?.includes('Brief');
     const { v4: uuidv4 } = await import('uuid');
     insertKnowledge(db, {
       id: uuidv4(),

@@ -19,8 +19,8 @@ if [ "$SOURCE_HASH" != "$BUILT_HASH" ] || [ ! -f "$BINARY" ]; then
   echo "Compiling claude-proxy (source changed)..."
   swiftc "$DIR/main.swift" -o "$BINARY" -framework Cocoa -O
   codesign --force --sign - "$BINARY" 2>/dev/null
-  xattr -d com.apple.quarantine "$BINARY" 2>/dev/null
-  xattr -d com.apple.quarantine "$BINARY" 2>/dev/null
+  xattr -d com.apple.quarantine "$BINARY" 2>/dev/null || true
+  xattr -d com.apple.quarantine "$BINARY" 2>/dev/null || true
   echo "$SOURCE_HASH" > "$APP_DIR/.source_hash"
   echo "Binary rebuilt, signed, quarantine removed"
 else
@@ -67,11 +67,22 @@ echo "Loading launchd agent..."
 launchctl unload "$HOME/Library/LaunchAgents/com.prime.claude-proxy.plist" 2>/dev/null || true
 launchctl load "$HOME/Library/LaunchAgents/com.prime.claude-proxy.plist"
 
-sleep 2
+# Verify. The listener is only created in applicationDidFinishLaunching, so it is
+# unreachable until NSApplication finishes its GUI launch handshake — measured at
+# ~6s, three times the 2s this check used to sleep, so every successful rebuild
+# reported a false failure. ThrottleInterval is 30s, so leave room for a respawn too.
+echo "Waiting for proxy to answer /health..."
+SECONDS=0
+while [ $SECONDS -lt 60 ]; do
+  if curl -s --max-time 2 http://127.0.0.1:3211/health | grep -q ok; then
+    echo "✓ claude-proxy is running on http://localhost:3211 (ready after ${SECONDS}s)"
+    exit 0
+  fi
+  sleep 1
+done
 
-# Verify
-if curl -s http://localhost:3211/health | grep -q ok; then
-  echo "✓ claude-proxy is running on http://localhost:3211"
-else
-  echo "✗ Failed to start. Check ~/.prime/logs/claude-proxy-error.log"
-fi
+echo "✗ No answer on http://localhost:3211/health after 60s."
+echo "  claude-proxy-error.log is normally empty — the proxy's stdout is block-buffered"
+echo "  and never flushed, so it stays empty even on a healthy run."
+echo "  Check instead: launchctl print gui/\$(id -u)/com.prime.claude-proxy | grep -E 'state|runs|last exit'"
+exit 1

@@ -1,12 +1,11 @@
 {
   "mcpServers": {
     "prime-recall": {
-      "command": "/Users/zstoc/GitHub/prime/node_modules/.bin/tsx",
+      "command": "${HOME}/GitHub/prime/node_modules/.bin/tsx",
       "args": [
-        "/Users/zstoc/GitHub/prime/src/server/mcp.ts"
+        "${HOME}/GitHub/prime/src/server/mcp.ts"
       ],
       "env": {
-        "HOME": "/Users/zstoc",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
       }
     }

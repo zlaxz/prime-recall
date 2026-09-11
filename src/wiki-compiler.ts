@@ -65,7 +65,7 @@ export async function compileWikiPages(db: Database.Database): Promise<CompileRe
     FROM knowledge WHERE project IS NOT NULL AND project != ''
     AND source_date >= datetime('now', '-30 days')
     GROUP BY project HAVING cnt >= 3
-    ORDER BY last_activity DESC LIMIT 16
+    ORDER BY last_activity DESC LIMIT 8
   `).all() as any[];
   const projects = allProjects.filter(p => !dismissedProjects.includes(p.project));
 
@@ -139,7 +139,7 @@ export async function compileWikiPages(db: Database.Database): Promise<CompileRe
           const pmConcerns = pmState?.concerns ? "PM CONCERNS:\n" + pmState.concerns.slice(0, 500) : '';
 
           const result = await compileProjectWiki(db, project, {
-            maxTurns: state?.last_wiki_page ? 30 : 100,
+            maxTurns: state?.last_wiki_page ? 20 : 60,
             previousPage: state?.last_wiki_page || undefined,
             memory: state?.memory || undefined,
             // Pass downstream context as soul (injected at top of prompt)

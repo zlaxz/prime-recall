@@ -106,7 +106,7 @@ function capMemory(memoryContent: string): string {
     '',
   ].join('\n');
 
-  return [historicalBlock, ...toKeep].join('\n\n');
+  return [...historicalParts, historicalBlock, ...toKeep].join('\n\n');
 }
 
 // Call the proxy to run Opus with MCP tools.
@@ -117,13 +117,20 @@ async function callProxy(prompt: string, maxTurns: number, timeoutSec: number): 
   const execFileAsync = promisify(execFile);
 
   // Always fresh session — no --resume. Persistent memory lives in files, not session context.
-  const args = ['--model', 'claude-opus-4-7', '--max-turns', String(maxTurns)];
+  const args = ['--model', 'claude-sonnet-5', '--max-turns', String(maxTurns)]; // monitors: routine investigation — Sonnet 5; Quinn keeps Opus
 
   const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
-  const tmpPath = `/tmp/pm-proxy-${Date.now()}.json`;
+  // Not a named file in /tmp: it is world-readable, and this body is the full
+  // PM prompt (mail, deals, contacts). A predictable name there is also
+  // pre-creatable by any local process, so writeFileSync would follow a planted
+  // symlink. Same fix as runClaudeViaProxyCurl in utils/claude-spawn.ts.
+  const { mkdtempSync, rmdirSync } = await import('fs');
+  const { tmpdir } = await import('os');
+  const tmpDir = mkdtempSync(join(tmpdir(), 'pm-proxy-'));
+  const tmpPath = join(tmpDir, 'body.json');
 
   try {
-    writeFileSync(tmpPath, body);
+    writeFileSync(tmpPath, body, { mode: 0o600 });
     const { stdout } = await execFileAsync('/usr/bin/curl', [
       '-s', '-X', 'POST',
       'http://127.0.0.1:3211/claude',
@@ -134,9 +141,13 @@ async function callProxy(prompt: string, maxTurns: number, timeoutSec: number): 
 
     const parsed = JSON.parse(stdout);
     if (parsed.error) throw new Error(`Proxy error: ${parsed.error}`);
+    if (parsed.exit_code !== undefined && parsed.exit_code !== 0) {
+      throw new Error(`Proxy exit_code ${parsed.exit_code}: ${String(parsed.result || '').slice(0, 120)}`);
+    }
     return { result: parsed.result || '', sessionId: parsed.session_id || '' };
   } finally {
     try { const { unlinkSync } = await import('fs'); unlinkSync(tmpPath); } catch {}
+    try { rmdirSync(tmpDir); } catch {}
   }
 }
 
@@ -148,7 +159,8 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
 
   // Load agent identity and memory
   const soul = readFile(join(dir, 'SOUL.md'));
-  const memory = readFile(join(dir, 'MEMORY.md'));
+  const memoryRaw = readFile(join(dir, 'MEMORY.md'));
+  const memory = memoryRaw.length > 40000 ? '(older memory truncated)\n' + memoryRaw.slice(-40000) : memoryRaw;
   const concerns = readFile(join(dir, 'CONCERNS.md'));
   const lastWikiPage = readFile(join(dir, 'wiki-page.md'));
 
@@ -156,6 +168,44 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   const now = new Date();
   const dayName = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][now.getDay()];
   const dateStr = `${dayName}, ${now.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
+
+  // Proposals Zach accepted → this cycle's work orders for this monitor
+  let acceptedBlock = '';
+  try {
+    const { ensureLedger } = await import('./ledger.js');
+    ensureLedger(db);
+    const acc = db.prepare("SELECT item, title, next_action FROM ledger WHERE monitor=? AND tier='propose' AND status='accepted'").all(config.agentId) as any[];
+    if (acc.length) {
+      acceptedBlock = '## ACCEPTED PROPOSALS — DO THESE THIS CYCLE\n' + acc.map((a: any) => `- [${a.item}] ${a.title}\n  Plan: ${a.next_action || ''}`).join('\n') +
+        '\nExecute each within your walls (documents go in your wiki page, drafts in the ledger draft field, research into the wiki). When done, re-emit the item in your LEDGER block with "status":"resolved" and put a one-line summary in MEMORY_UPDATE.';
+    }
+  } catch {}
+
+  // Existing keys (so updates match) and Zach's decisions (so they aren't re-pitched)
+  let keysBlock = '';
+  try {
+    const existing = db.prepare("SELECT item, tier, status, substr(title,1,70) t FROM ledger WHERE monitor=? AND (status='open' OR updated_at >= datetime('now','-30 days')) ORDER BY status, tier").all(config.agentId) as any[];
+    if (existing.length) {
+      keysBlock = '## YOUR LEDGER KEYS — reuse these exact item keys; never invent a new key for the same thing\n' +
+        existing.map((e: any) => `- ${e.item} [${e.tier}/${e.status}] ${e.t}`).join('\n') +
+        '\nItems marked dismissed or declined are Zach\'s decisions: do NOT re-emit them as open and do NOT re-propose them.';
+    }
+  } catch {}
+
+  // Zach's own words (email replies / notes routed through the intent layer) — every monitor sees them.
+  let directivesBlock = '';
+  try {
+    const drows = db.prepare("SELECT summary, created_at FROM knowledge WHERE source='directive' AND created_at >= datetime('now','-7 days') ORDER BY created_at DESC LIMIT 8").all() as any[];
+    if (drows.length) {
+      directivesBlock = "## ZACH'S OWN WORDS (recent replies/notes — these override your judgment)\n" +
+        drows.map((d: any) => '- [' + String(d.created_at).slice(0, 10) + '] ' + String(d.summary || '').replace(/\s+/g, ' ').slice(0, 240)).join('\n') +
+        '\nIf any of these touch YOUR items: obey them. If Zach said he will not do something, stop drafting toward it — re-tier the item to brief/wiki or resolve it, and never attach a draft that contradicts his stated position.\n';
+    }
+  } catch {}
+
+  // How Zach actually writes — curated real sent-mail samples; drafts must match this voice.
+  const voiceRaw = readFile(join(getAgentDir('shared'), 'VOICE.md'));
+  const voiceBlock = voiceRaw ? '## HOW ZACH ACTUALLY WRITES (real sent-mail samples — match this voice in every draft)\n' + voiceRaw.slice(0, 3000) + '\n' : '';
 
   const prompt = [
     soul || `You are the PM for ${config.project}.`,
@@ -165,6 +215,10 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     memory ? `## WHAT I REMEMBER\n${memory}\n` : '',
     concerns ? `## WHAT I'M WATCHING\n${concerns}\n` : '',
     lastWikiPage ? `## MY LAST WIKI PAGE\n${lastWikiPage.slice(0, 3000)}\n` : '',
+    acceptedBlock,
+    keysBlock,
+    directivesBlock,
+    voiceBlock,
     '',
     'You have MCP tools. Use them to investigate what\'s new since your last cycle.',
     'Search for recent emails, check commitments, check the calendar.',
@@ -174,9 +228,11 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     '- VERIFY OWNERSHIP: Before saying "Person X owns task Y," search for emails between X and the relevant party. Check WHO is actually in the email thread. If Zach has been emailing someone directly, that is Zach\'s relationship — do not attribute it to a team member just because they were mentioned nearby.',
     '- CITE OR DELETE: Every factual claim must trace to a specific email you retrieved via prime_retrieve. If you only read a summary or search result, you do NOT have evidence. Either retrieve the source or delete the claim.',
     '- SEPARATE VERIFIED FROM ASSUMED: In your wiki page, mark claims as [VERIFIED: thread:ID] or [UNVERIFIED: inference from summary]. Do not present inferences as facts.',
+    '- NO SEND AUTHORITY: You must NEVER call prime_send_email, prime_notify, prime_approve_action, prime_schedule_meeting, or any tool that emails Zach or contacts a third party. Outbound text goes ONLY into the ledger draft field — Zach sends it himself.',
+    '- ACT BUDGET: at most 2 act-tier ledger items per cycle. If more qualify, keep the two most costly to delay and tier the rest remind or brief.',
     '- CHECK YOUR PRIOR ASSUMPTIONS: Your memory from last cycle may be wrong. If you wrote "Forrest is handling X" last cycle, verify it this cycle by checking who is actually emailing about X.',
     '',
-    'After investigating AND verifying your claims, produce THREE outputs separated by these exact markers:',
+    'After investigating AND verifying your claims, produce FOUR outputs separated by these exact markers:',
     '',
     '---WIKI_PAGE---',
     '(Your updated wiki page for ' + config.project + ')',
@@ -186,6 +242,25 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
     '',
     '---CONCERNS_UPDATE---',
     '(What you\'re watching for next cycle. Replace the full list — keep it current.)',
+    '',
+    '---LEDGER---',
+    '(JSON array of ball-in-play items for your domain — the structured version of your wiki. Each: {"item":"stable-key-that-matches-prior-cycles","title":"short human line","counterparty":"who","state":"where it stands","ball":"zach|other","ball_since":"YYYY-MM-DD","deadline":"YYYY-MM-DD or null","next_action":"one concrete step","draft":"ready-to-send text or null","tier":"act|remind|brief|wiki","status":"open|resolved"}.',
+    'TIER RULES — tier "act" ONLY when ALL THREE hold: a finished draft is attached, delay costs something real (deadline/stall/money/legal), and only Zach can do it. Deadline-shaped with no decision → "remind". Awareness only → "brief". Something YOU watch → "wiki". Overuse of "act" makes every alert meaningless.',
+    'DRAFT RULES — a draft goes out under Zach\'s name. It must sound like him and contain nothing he cannot stand behind:',
+    '- VOICE: match the HOW ZACH ACTUALLY WRITES samples above — short sentences, direct, no filler. Never "I hope this finds you well", never manufactured enthusiasm, never an invented excuse or backstory. Zach does not explain himself unprompted.',
+    '- LENGTH: default under 90 words; hard ceiling 140. If the task genuinely needs formal or legal language, that is a DELIVERABLE document, not an email draft.',
+    '- ONE PURPOSE: the draft does exactly the item\'s next_action — one ask or one piece of information. No bundled asks, no recap of history the counterparty already knows.',
+    '- FACTS: every statement in a draft carries the same evidence bar as your wiki. If a fact you need is unverified, write [CHECK: what to confirm] in its place — a visible placeholder is fine; a fabrication in Zach\'s mouth is the worst failure this system can produce.',
+    '- CONTEXT: before drafting a reply, retrieve the latest message in that thread and answer what the counterparty actually asked, in their terms.',
+    '- POSITION: if ZACH\'S OWN WORDS above state a position touching this item, the draft follows it exactly — or you emit "draft": null and re-tier the item.',
+    'ATTACHMENTS: search results with source attachment-index are document CARDS (dec pages, signed agreements, loss runs, filings). When a task turns on what a document actually says, call prime_read_attachment with the card\'s message_id and filename to read it live. Cite documents you read as [VERIFIED: attachment:message_id:filename].',
+    'PROPOSALS RULE: you may include at most ONE ledger item per cycle with "tier":"propose" — an OFFER of something you COULD do for Zach beyond your current instructions: a document (claim chronology, renewal package, comparison sheet), a research task, a new watch item, a draft he did not ask for. Title it as an offer ("I could build…"), put the concrete plan in next_action, ball "agent", no deadline. Never propose sending anything to a third party. Do not re-propose something already declined.',
+    'RESOURCES RULE: every act/remind item should include "links": [{"label":"...","url":"..."}] — up to 4. Convert the thread ids you cite into Gmail deep links: https://mail.google.com/mail/u/0/#all/THREAD_ID (drop the "thread:" prefix). CRITICALLY: hunt for the artifact that would COMPLETE the task (the policy document, the filing portal, the attachment) — link the email that carries it, a Drive URL if one appears in the record, or the official portal URL if one is cited in the sources. If the completing artifact does NOT exist in the record after searching, say so explicitly in next_action ("searched: no renewed dec page exists in email history") — a verified absence is decisive information.',
+    'EVIDENCE GATE: an act-tier item MUST carry at least one link (Gmail deep link to the source thread, portal, or Drive) or it will be downgraded automatically — Zach never gets an action email without evidence.',
+    'CLOSURE BY OBSERVATION: before emitting an item, search Zach\'s sent mail (source gmail-sent) — if he already took the recommended action, set status "resolved". Keep item keys stable so updates match.)',
+    '',
+    '---DELIVERABLE---',
+    '(OPTIONAL, repeatable. When you complete an ACCEPTED PROPOSAL or produce any finished document — a claim chronology, tender packet, renewal package, comparison — emit it here so it lands in Zach\'s hands as a file, not buried in your wiki. First line: item: <the ledger item key it fulfills>. Second line: filename: <short-slug>.md. Then the full markdown document. Keep the fulfilled ledger item in your LEDGER block with status "resolved".)',
   ].filter(Boolean).join('\n');
 
   // Call Opus via proxy — fresh session each cycle
@@ -201,25 +276,82 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   const wikiMarker = content.indexOf('---WIKI_PAGE---');
   const memoryMarker = content.indexOf('---MEMORY_UPDATE---');
   const concernsMarker = content.indexOf('---CONCERNS_UPDATE---');
+  const ledgerMarkerPos = content.indexOf('---LEDGER---');
+  // A missing middle marker must not let a slice swallow later blocks
+  // (MEMORY.md was ingesting the raw LEDGER JSON when CONCERNS was absent).
+  const nextMarkerAfter = (pos: number): number | undefined => {
+    const later = [memoryMarker, concernsMarker, ledgerMarkerPos, content.indexOf('---DELIVERABLE---')].filter(m => m > pos);
+    return later.length ? Math.min(...later) : undefined;
+  };
 
-  if (wikiMarker >= 0 && memoryMarker >= 0) {
-    wikiPage = content.slice(wikiMarker + '---WIKI_PAGE---'.length, memoryMarker).trim();
-  } else if (wikiMarker >= 0) {
-    wikiPage = content.slice(wikiMarker + '---WIKI_PAGE---'.length).trim();
+  if (wikiMarker >= 0) {
+    wikiPage = content.slice(wikiMarker + '---WIKI_PAGE---'.length, nextMarkerAfter(wikiMarker)).trim();
+  }
+  if (memoryMarker >= 0) {
+    memoryUpdate = content.slice(memoryMarker + '---MEMORY_UPDATE---'.length, nextMarkerAfter(memoryMarker)).trim();
   }
 
-  if (memoryMarker >= 0 && concernsMarker >= 0) {
-    memoryUpdate = content.slice(memoryMarker + '---MEMORY_UPDATE---'.length, concernsMarker).trim();
-  } else if (memoryMarker >= 0) {
-    memoryUpdate = content.slice(memoryMarker + '---MEMORY_UPDATE---'.length).trim();
-  }
-
+  const ledgerMarker = ledgerMarkerPos;
   if (concernsMarker >= 0) {
-    concernsUpdate = content.slice(concernsMarker + '---CONCERNS_UPDATE---'.length).trim();
+    const cEnds = [ledgerMarker, content.indexOf('---DELIVERABLE---')].filter(m => m > concernsMarker);
+    concernsUpdate = content.slice(concernsMarker + '---CONCERNS_UPDATE---'.length, cEnds.length ? Math.min(...cEnds) : undefined).trim();
   }
 
-  // Save wiki page
-  writeAgentFile(config.agentId, 'wiki-page.md', wikiPage);
+  // Parse + store ledger rows (structured ball-tracking behind the wiki)
+  if (ledgerMarker >= 0) {
+    try {
+      const delivMarker = content.indexOf('---DELIVERABLE---');
+      let raw = content.slice(ledgerMarker + '---LEDGER---'.length, delivMarker > ledgerMarker ? delivMarker : undefined).trim();
+      raw = raw.replace(/^```(json)?/m, '').replace(/```\s*$/m, '').trim();
+      const start = raw.indexOf('['); const end = raw.lastIndexOf(']');
+      if (start >= 0 && end > start) {
+        const rows = JSON.parse(raw.slice(start, end + 1));
+        const { upsertLedgerRows } = await import('./ledger.js');
+        const n = upsertLedgerRows(db, config.agentId, rows);
+        console.log(`    PM ${config.agentId}: ${n} ledger rows upserted`);
+      }
+    } catch (e: any) {
+      console.log(`    PM ${config.agentId}: ledger parse failed — ${(e.message || '').slice(0, 80)}`);
+    }
+  }
+
+  // Deliverables → files Zach can open (synced to ~/Documents/Claude/Prime/deliverables/)
+  try {
+    const blocks = content.split('---DELIVERABLE---').slice(1);
+    if (blocks.length) {
+      const outDir = join(homedir(), '.prime', 'export', 'deliverables', config.agentId);
+      mkdirSync(outDir, { recursive: true });
+      const { ensureLedger } = await import('./ledger.js');
+      ensureLedger(db);
+      for (const b of blocks) {
+        const lines = b.trim().split('\n');
+        const itemLine = lines.find(l => /^item:/i.test(l)) || '';
+        const fileLine = lines.find(l => /^filename:/i.test(l)) || '';
+        const itemKey = itemLine.replace(/^item:\s*/i, '').trim();
+        let fname = fileLine.replace(/^filename:\s*/i, '').trim().replace(/[^\w.-]/g, '_') || `deliverable-${Date.now()}.md`;
+        if (!/\.md$/i.test(fname)) fname += '.md';
+        const bodyStart = lines.findIndex(l => !/^(item|filename):/i.test(l) && l.trim() !== '');
+        const doc = lines.slice(Math.max(bodyStart, 0)).join('\n').trim();
+        if (doc.length < 200) { console.log(`    PM ${config.agentId}: deliverable "${fname}" too short (${doc.length} chars) — not saved`); continue; }
+        if (itemKey) fname = `${itemKey.replace(/[^\w.-]/g, '_').slice(0, 40)}--${fname}`;  // no cross-item overwrites
+        const fp = join(outDir, fname);
+        writeFileSync(fp, `<!-- ${config.agentId} · ${dateStr} · fulfills: ${itemKey || 'n/a'} -->\n\n${doc}`, 'utf-8');
+        if (itemKey) db.prepare("UPDATE ledger SET deliverable=? WHERE monitor=? AND item=?").run(`deliverables/${config.agentId}/${fname}`, config.agentId, itemKey);
+        console.log(`    PM ${config.agentId}: deliverable saved — ${fname}`);
+      }
+    }
+  } catch (e: any) {
+    console.log(`    PM ${config.agentId}: deliverable parse failed — ${(e.message || '').slice(0, 80)}`);
+  }
+
+  // Save wiki page — only when markers parsed and content is substantive.
+  // An unmarked or tiny response means the run failed; keep the old page.
+  const wikiValid = wikiMarker >= 0 && wikiPage.length >= 200;
+  if (wikiValid) {
+    writeAgentFile(config.agentId, 'wiki-page.md', wikiPage);
+  } else {
+    console.log(`    PM ${config.agentId}: wiki output invalid (marker=${wikiMarker >= 0}, len=${wikiPage.length}) — keeping previous page`);
+  }
 
   // Append to MEMORY.md (don't replace — accumulate, but cap at MAX_MEMORY_CYCLES)
   if (memoryUpdate) {
@@ -240,10 +372,10 @@ export async function runPMAgent(db: Database.Database, config: PMConfig): Promi
   const notesDir = join(dir, 'daily-notes');
   if (!existsSync(notesDir)) mkdirSync(notesDir, { recursive: true });
   const dateKey = now.toISOString().slice(0, 10);
-  writeFileSync(join(notesDir, dateKey + '.md'), `# ${config.agentId} — ${dateStr}\n\n${content}`, 'utf-8');
+  writeFileSync(join(notesDir, dateKey + '.md'), `\n\n# ${config.agentId} — ${dateStr} — run ${now.toISOString().slice(11, 16)}\n\n${content}`, { encoding: 'utf-8', flag: 'a' });
 
   // Store wiki page in compiled_pages
-  db.prepare(`
+  if (wikiValid) db.prepare(`
     INSERT OR REPLACE INTO compiled_pages (id, page_type, subject_id, subject_name, content, version,
       last_source_date, compiled_at, stale)
     VALUES (?, 'project', ?, ?, ?, COALESCE((SELECT version + 1 FROM compiled_pages WHERE page_type = 'project' AND subject_id = ?), 1),

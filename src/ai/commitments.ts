@@ -49,7 +49,7 @@ export async function extractCommitments(
   let errors = 0;
 
   // Collect all items that have commitments in their JSON array
-  const itemsWithCommitments: { item: any; commitmentTexts: string[] }[] = [];
+  const itemsWithCommitments: { item: any; commitmentTexts: any[] }[] = [];
   for (const item of items) {
     const commitments = Array.isArray(item.commitments) ? item.commitments : [];
     if (commitments.length > 0) {

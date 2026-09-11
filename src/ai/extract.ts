@@ -5,7 +5,6 @@ let _cachedBusinessContext: string | null = null;
 let _contextLoadedAt = 0;
 
 // Cache the provider instance
-let _cachedProvider: LLMProvider | null = null;
 
 export function setBusinessContext(ctx: string) {
   _cachedBusinessContext = ctx;
@@ -71,11 +70,12 @@ Rules:
 - Be concise. Summaries under 3 sentences. Title under 80 chars.`;
 
 async function getProvider(apiKey?: string): Promise<LLMProvider> {
-  if (_cachedProvider) return _cachedProvider;
   // Use DeepSeek Reasoner for bulk extraction — same quality, doesn't burn Max allocation
+  // No local cache: getBulkProvider caches on the resolved API key, so a key
+  // rotation rebuilds the provider. Caching the instance here would pin a
+  // long-lived process (serve) to a revoked key for its whole lifetime.
   const { getBulkProvider } = await import('./providers.js');
-  _cachedProvider = await getBulkProvider(apiKey);
-  return _cachedProvider;
+  return getBulkProvider(apiKey);
 }
 
 export async function extractIntelligence(

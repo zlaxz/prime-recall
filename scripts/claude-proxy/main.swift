@@ -1,6 +1,96 @@
 import Foundation
 import Cocoa
 
+// stdout here is a launchd StandardOutPath — a regular file, so libc picks FULL
+// buffering (a 4KB block) and this process never exits normally to flush it.
+// Result: claude-proxy.log and claude-proxy-error.log both sat at 0 bytes with
+// an April mtime while the daemon restarted repeatedly, and every proxy incident
+// so far had to be reconstructed from shift.log and `launchctl print`. Worse, a
+// signal death discards the buffer outright — so the SIGPIPE kill below, the one
+// event most worth a log line, was exactly the one that could never survive to
+// disk. Line-buffer it so each line lands as it is written.
+_ = setvbuf(stdout, nil, _IOLBF, 0)
+
+// Timestamped so a line can be lined up against shift.log and health-monitor.log,
+// which use the same [YYYY-MM-DD HH:MM:SS] shape. localtime_r + a single fputs
+// keep this reentrant and the line atomic under the FILE lock — handlers run on
+// concurrent queues. NEVER log prompt or result CONTENT: these logs are mode 644
+// and the prompts carry Zach's mail, deals and contacts. Sizes, routes, exit
+// codes and durations are what incidents actually needed.
+func plog(_ msg: String) {
+    var t = time(nil)
+    var parts = tm()
+    localtime_r(&t, &parts)
+    var buf = [CChar](repeating: 0, count: 32)
+    strftime(&buf, buf.count, "%Y-%m-%d %H:%M:%S", &parts)
+    fputs("[\(String(cString: buf))] \(msg)\n", stdout)
+}
+
+// Elapsed seconds, one decimal, for run/queue durations.
+func elapsed(_ since: DispatchTime) -> String {
+    let s = Double(DispatchTime.now().uptimeNanoseconds &- since.uptimeNanoseconds) / 1e9
+    return String(format: "%.1f", s)
+}
+
+// One claude child at a time. Concurrent children racing an OAuth token
+// refresh rotate each other's refresh tokens and de-auth the whole login
+// (observed 2026-08-07 and 2026-09-06). Requests queue; agents are patient.
+let claudeGate = DispatchSemaphore(value: 1)
+
+// A client that gave up (curl --max-time) leaves a half-closed socket behind.
+// Writing the response to it raises SIGPIPE, whose DEFAULT DISPOSITION KILLS
+// this whole process — so one abandoned request takes down every other agent
+// that is in flight or queued (2026-09-09: five PM agents lost to one 900s run;
+// `launchctl print` showed `last terminating signal = Broken pipe: 13`).
+// Ignore it and let write() return EPIPE like any other error.
+_ = signal(SIGPIPE, SIG_IGN)
+
+// Take the gate, but never for longer than the caller's own budget. Callers give
+// curl `timeout + 30`, so a request that has already queued for its full timeout
+// cannot finish inside the client's window — without this it would wake up, run
+// a claude nobody is listening to, and hold the gate for another full run.
+func acquireClaudeGate(seconds: Int) -> Bool {
+    return claudeGate.wait(timeout: .now() + .seconds(max(seconds, 1))) == .success
+}
+let busyBody = "{\"error\":\"proxy busy — another claude agent held the gate for this caller's full timeout\"}"
+
+// Seconds the caller has left after queueing. The caller's clock started when it
+// connected, not when we got the gate; spending a fresh full timeout on a run
+// whose client already hung up is what turns one slow agent into a starved queue.
+func remainingBudget(_ timeout: Int, since start: DispatchTime) -> Int {
+    let queued = Int(Double(DispatchTime.now().uptimeNanoseconds &- start.uptimeNanoseconds) / 1e9)
+    return max(timeout - queued, 1)
+}
+
+// Feed a child's stdin off the handler thread. The pipe buffer is 64KB and agent
+// prompts are larger, so the write only finishes as fast as claude drains it —
+// and it runs BEFORE the deadline watchdog is armed, so a child that stalls
+// without reading holds claudeGate with no timeout at all (reproduced
+// 2026-09-09: write() still blocked after 20s against a live, non-draining
+// child). FileHandle.write is doubly wrong here: when the child instead exits
+// mid-write it turns EPIPE into NSFileHandleOperationException, an ObjC
+// exception Swift cannot catch, which aborts this whole process and every agent
+// with it — the SIGPIPE fix above does not help, because Foundation raises
+// rather than signals. Raw write() has neither problem: a dead reader is just
+// -1/EPIPE, and the handler is free to reach its own timeout and terminate().
+func feedStdin(_ pipe: Pipe, _ text: String) {
+    let bytes = Array(text.utf8)
+    DispatchQueue.global().async {
+        let fd = pipe.fileHandleForWriting.fileDescriptor
+        bytes.withUnsafeBufferPointer { buf in
+            var sent = 0
+            while sent < bytes.count {
+                let n = write(fd, buf.baseAddress! + sent, bytes.count - sent)
+                if n <= 0 { break }  // EPIPE — child is gone; the run reports it
+                sent += n
+            }
+        }
+        // close() (not close(fd)) so the FileHandle records the close and its
+        // dealloc cannot shut a descriptor number some later client now owns.
+        try? pipe.fileHandleForWriting.close()
+    }
+}
+
 // ============================================================
 // Claude Proxy — Headless macOS GUI app
 //
@@ -20,7 +110,7 @@ class ProxyDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         server = HTTPServer(port: 3211)
         server?.start()
-        print("[claude-proxy] Listening on http://localhost:3211")
+        plog("listening on http://localhost:3211 (pid \(getpid()))")
     }
 }
 
@@ -75,15 +165,17 @@ class HTTPServer {
         guard firstRead > 0 else { close(fd); return }
         allData.append(contentsOf: buf[..<firstRead])
 
-        // Check Content-Length and keep reading until we have the full body
-        if let headerStr = String(data: allData, encoding: .utf8),
+        // Check Content-Length and keep reading until we have the full body.
+        // Header size MUST be computed in BYTES from raw Data — Swift String
+        // counts \r\n as ONE Character, so String.distance under-counts by one
+        // byte per CRLF and the read loop stops short, truncating the body.
+        if let hdrEnd = allData.range(of: Data([13, 10, 13, 10])),
+           let headerStr = String(data: allData.subdata(in: 0..<hdrEnd.upperBound), encoding: .utf8),
            let clRange = headerStr.range(of: "Content-Length: ", options: .caseInsensitive),
            let endRange = headerStr[clRange.upperBound...].range(of: "\r\n") {
             let clStr = String(headerStr[clRange.upperBound..<endRange.lowerBound])
-            if let contentLength = Int(clStr),
-               let headerEnd = headerStr.range(of: "\r\n\r\n") {
-                let headerSize = headerStr.distance(from: headerStr.startIndex, to: headerEnd.upperBound)
-                let totalNeeded = headerSize + contentLength
+            if let contentLength = Int(clStr) {
+                let totalNeeded = hdrEnd.upperBound + contentLength
 
                 while allData.count < totalNeeded {
                     let n = read(fd, &buf, min(buf.count, totalNeeded - allData.count))
@@ -113,12 +205,16 @@ class HTTPServer {
             guard let data = body.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let message = json["message"] as? String else {
+                plog("#\(fd) /prime 400 missing message — \(body.utf8.count)B body")
                 sendResponse(fd, status: 400, body: "{\"error\":\"missing message\"}")
                 return
             }
 
             let sessionId = json["session_id"] as? String
             let timeout = json["timeout"] as? Int ?? 300  // 5 min default for strategic questions with tool use
+            // fd doubles as the request id — reused after close, but unique across
+            // everything open at once, which is the only window worth correlating.
+            plog("#\(fd) /prime in — \(body.utf8.count)B, timeout \(timeout)s\((sessionId?.isEmpty == false) ? ", resume" : "")")
 
             // Build args: always use MCP, allow enough turns for tool calls + response
             var args = ["-p", "--output-format", "json", "--max-turns", "50"]
@@ -131,7 +227,9 @@ class HTTPServer {
             // Load MCP config
             let mcpConfig = NSHomeDirectory() + "/.claude/.mcp.json"
             if FileManager.default.fileExists(atPath: mcpConfig) {
-                args += ["--mcp-config", mcpConfig]
+                // strict: account-level claude.ai connectors (unauthenticatable
+                // headless) shadow the local prime-recall server by name
+                args += ["--mcp-config", mcpConfig, "--strict-mcp-config"]
             }
 
             // System prompt for Prime identity
@@ -159,6 +257,15 @@ class HTTPServer {
                 Zach says: \(message)
                 """
 
+            let gateStart = DispatchTime.now()
+            guard acquireClaudeGate(seconds: timeout) else {
+                plog("#\(fd) /prime 503 busy — waited \(elapsed(gateStart))s for the gate")
+                return sendResponse(fd, status: 503, body: busyBody)
+            }
+            defer { claudeGate.signal() }
+            let runTimeout = remainingBudget(timeout, since: gateStart)
+            plog("#\(fd) /prime got gate after \(elapsed(gateStart))s — running claude, \(runTimeout)s budget")
+            let runStart = DispatchTime.now()
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
             proc.arguments = args
@@ -173,18 +280,18 @@ class HTTPServer {
 
             do {
                 try proc.run()
-                stdinPipe.fileHandleForWriting.write(primePrompt.data(using: .utf8)!)
-                stdinPipe.fileHandleForWriting.closeFile()
+                feedStdin(stdinPipe, primePrompt)
 
-                let deadline = DispatchTime.now() + .seconds(timeout)
+                let deadline = DispatchTime.now() + .seconds(runTimeout)
                 let sem = DispatchSemaphore(value: 0)
                 DispatchQueue.global().async { proc.waitUntilExit(); sem.signal() }
 
                 if sem.wait(timeout: deadline) == .timedOut {
                     proc.terminate()
-                    sendResponse(fd, status: 504, body: "{\"error\":\"timeout\"}")
-                    return
+                    plog("#\(fd) /prime 504 — claude pid \(proc.processIdentifier) killed at \(elapsed(runStart))s")
+                    return sendResponse(fd, status: 504, body: "{\"error\":\"timeout\"}")
                 }
+                plog("#\(fd) /prime claude exited \(proc.terminationStatus) in \(elapsed(runStart))s")
 
                 let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
                 let output = String(data: stdout, encoding: .utf8) ?? ""
@@ -202,6 +309,7 @@ class HTTPServer {
                     sendResponse(fd, status: 200, body: "{\"content\":\"\(output.prefix(5000))\",\"session_id\":\"\"}")
                 }
             } catch {
+                plog("#\(fd) /prime 500 — could not run claude: \(error.localizedDescription)")
                 sendResponse(fd, status: 500, body: "{\"error\":\"\(error.localizedDescription)\"}")
             }
             return
@@ -214,6 +322,9 @@ class HTTPServer {
                 sendResponse(fd, status: 200, body: "{\"note\":\"session management via /cos endpoint\"}")
                 return
             }
+            // Request line only, capped: Swift folds "\r\n" into ONE Character, so a
+            // `$0 != "\r"` prefix never terminates and would dump whole bodies here.
+            plog("#\(fd) 404 — \(raw.prefix(while: { !$0.isNewline }).prefix(80))")
             sendResponse(fd, status: 404, body: "{\"error\":\"not found. Use POST /cos for COS chat, POST /claude for raw calls.\"}")
             return
         }
@@ -222,6 +333,7 @@ class HTTPServer {
         guard let data = body.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let prompt = json["prompt"] as? String else {
+            plog("#\(fd) /claude 400 missing prompt — \(body.utf8.count)B body of \(allData.count)B read")
             sendResponse(fd, status: 400, body: "{\"error\":\"missing prompt\"}")
             return
         }
@@ -229,6 +341,7 @@ class HTTPServer {
         let timeout = json["timeout"] as? Int ?? 300
         let extraArgs = json["args"] as? [String] ?? []
         let isBackground = json["background"] as? Bool ?? false
+        plog("#\(fd) /claude in — \(prompt.utf8.count)B prompt, timeout \(timeout)s\(isBackground ? ", background" : "")\(extraArgs.isEmpty ? "" : ", args \(extraArgs)")")
 
         // Build claude -p command
         // Allow enough turns for tool use (web search, MCP calls)
@@ -238,11 +351,16 @@ class HTTPServer {
         // Load MCP config if available
         let mcpConfig = NSHomeDirectory() + "/.claude/.mcp.json"
         if FileManager.default.fileExists(atPath: mcpConfig) {
-            args += ["--mcp-config", mcpConfig]
+            args += ["--mcp-config", mcpConfig, "--strict-mcp-config"]
         }
 
         // Background mode: spawn claude, respond immediately with 202, don't wait
         if isBackground {
+            let bgGateStart = DispatchTime.now()
+            guard acquireClaudeGate(seconds: timeout) else {
+                plog("#\(fd) /claude 503 busy (background) — waited \(elapsed(bgGateStart))s for the gate")
+                return sendResponse(fd, status: 503, body: busyBody)
+            }
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
             proc.arguments = args
@@ -255,16 +373,32 @@ class HTTPServer {
 
             do {
                 try proc.run()
-                stdinPipe.fileHandleForWriting.write(prompt.data(using: .utf8)!)
-                stdinPipe.fileHandleForWriting.closeFile()
-                print("[claude-proxy] Background agent spawned (pid \(proc.processIdentifier))")
+                feedStdin(stdinPipe, prompt)
+                plog("#\(fd) /claude background agent spawned (pid \(proc.processIdentifier)) after \(elapsed(bgGateStart))s")
+                let bgStart = DispatchTime.now()
+                DispatchQueue.global().async {
+                    proc.waitUntilExit()
+                    claudeGate.signal()
+                    plog("background agent \(proc.processIdentifier) exited \(proc.terminationStatus) in \(elapsed(bgStart))s")
+                }
                 sendResponse(fd, status: 202, body: "{\"status\":\"spawned\",\"pid\":\(proc.processIdentifier)}")
             } catch {
+                claudeGate.signal()
+                plog("#\(fd) /claude 500 — could not spawn background claude: \(error.localizedDescription)")
                 sendResponse(fd, status: 500, body: "{\"error\":\"\(error.localizedDescription)\"}")
             }
             return
         }
 
+        let gateStart = DispatchTime.now()
+        guard acquireClaudeGate(seconds: timeout) else {
+            plog("#\(fd) /claude 503 busy — waited \(elapsed(gateStart))s for the gate")
+            return sendResponse(fd, status: 503, body: busyBody)
+        }
+        defer { claudeGate.signal() }
+        let runTimeout = remainingBudget(timeout, since: gateStart)
+        plog("#\(fd) /claude got gate after \(elapsed(gateStart))s — running claude, \(runTimeout)s budget")
+        let runStart = DispatchTime.now()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/claude")
         proc.arguments = args
@@ -279,11 +413,10 @@ class HTTPServer {
 
         do {
             try proc.run()
-            stdinPipe.fileHandleForWriting.write(prompt.data(using: .utf8)!)
-            stdinPipe.fileHandleForWriting.closeFile()
+            feedStdin(stdinPipe, prompt)
 
             // Wait with timeout
-            let deadline = DispatchTime.now() + .seconds(timeout)
+            let deadline = DispatchTime.now() + .seconds(runTimeout)
             let sem = DispatchSemaphore(value: 0)
             DispatchQueue.global().async {
                 proc.waitUntilExit()
@@ -292,12 +425,13 @@ class HTTPServer {
 
             if sem.wait(timeout: deadline) == .timedOut {
                 proc.terminate()
-                sendResponse(fd, status: 504, body: "{\"error\":\"timeout after \(timeout)s\"}")
-                return
+                plog("#\(fd) /claude 504 — claude pid \(proc.processIdentifier) killed at \(elapsed(runStart))s")
+                return sendResponse(fd, status: 504, body: "{\"error\":\"timeout after \(runTimeout)s\"}")
             }
 
             let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: stdout, encoding: .utf8) ?? ""
+            plog("#\(fd) /claude claude exited \(proc.terminationStatus) in \(elapsed(runStart))s — \(output.utf8.count)B out")
 
             // Try to parse JSON envelope
             if let jsonData = output.data(using: .utf8),
@@ -318,14 +452,32 @@ class HTTPServer {
                 sendResponse(fd, status: 200, body: "{\"result\":\"\(escaped)\",\"session_id\":\"\",\"exit_code\":\(proc.terminationStatus)}")
             }
         } catch {
+            plog("#\(fd) /claude 500 — could not run claude: \(error.localizedDescription)")
             sendResponse(fd, status: 500, body: "{\"error\":\"\(error.localizedDescription)\"}")
         }
     }
 
     func sendResponse(_ fd: Int32, status: Int, body: String) {
-        let statusText = status == 200 ? "OK" : status == 202 ? "Accepted" : status == 400 ? "Bad Request" : status == 404 ? "Not Found" : status == 504 ? "Gateway Timeout" : "Error"
+        let statusText = status == 200 ? "OK" : status == 202 ? "Accepted" : status == 400 ? "Bad Request" : status == 404 ? "Not Found" : status == 503 ? "Service Unavailable" : status == 504 ? "Gateway Timeout" : "Error"
         let response = "HTTP/1.1 \(status) \(statusText)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n\(body)"
-        write(fd, response, response.utf8.count)
+        // Write in a loop and tolerate a vanished client: with SIGPIPE ignored a
+        // dead peer surfaces as write() == -1 (EPIPE) instead of killing the proxy.
+        let bytes = Array(response.utf8)
+        var sent = 0
+        bytes.withUnsafeBufferPointer { buf in
+            while sent < bytes.count {
+                let n = write(fd, buf.baseAddress! + sent, bytes.count - sent)
+                if n <= 0 { break }
+                sent += n
+            }
+        }
+        // A short write means the client hung up before reading its answer — the
+        // abandoned-request case that used to kill the proxy outright. Log it;
+        // a complete write is the normal path and stays silent (the watchdog
+        // polls /health every 5 minutes and must not fill the log).
+        if sent < bytes.count {
+            plog("#\(fd) client vanished — \(status) response only \(sent)/\(bytes.count)B written")
+        }
         close(fd)
     }
 }

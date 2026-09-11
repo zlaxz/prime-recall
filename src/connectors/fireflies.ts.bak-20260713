@@ -117,15 +117,11 @@ export async function scanFireflies(
 
   const stats = { meetings: 0, items: 0, skipped: 0 };
 
-  // Fetch meetings list — filtered server-side, metadata only.
-  // Full sentences are fetched per-meeting below, and only for NEW meetings.
-  // (The old unbounded query pulled every transcript ever recorded with full
-  // sentences; the response grew with the archive until Fireflies intermittently
-  // errored with "Something unexpected happened".)
+  // Fetch meetings list
   console.log(`  Fetching meetings from ${fromDate} to ${toDate}...`);
   const data = await firefliesQuery(apiKey, `
-    query($fromDate: DateTime, $toDate: DateTime, $limit: Int) {
-      transcripts(fromDate: $fromDate, toDate: $toDate, limit: $limit) {
+    query {
+      transcripts {
         id
         title
         date
@@ -140,13 +136,14 @@ export async function scanFireflies(
         speakers {
           name
         }
+        sentences {
+          text
+          speaker_name
+          start_time
+        }
       }
     }
-  `, {
-    fromDate: new Date(Date.now() - days * 86400000).toISOString(),
-    toDate: new Date().toISOString(),
-    limit: Math.min(maxMeetings, 50), // Fireflies API caps limit at 50
-  });
+  `);
 
   const cutoff = Date.now() - days * 86400000;
   const meetings = (data.transcripts || [])
@@ -173,10 +170,6 @@ export async function scanFireflies(
 
   if (toProcess.length === 0) {
     console.log(`  All ${meetings.length} meetings already indexed`);
-    db.prepare(
-      `INSERT OR REPLACE INTO sync_state (source, last_sync_at, items_synced, status, updated_at)
-       VALUES ('fireflies', datetime('now'), 0, 'idle', datetime('now'))`
-    ).run();
     return stats;
   }
 
@@ -193,18 +186,8 @@ export async function scanFireflies(
         const participants = meeting.participants || [];
         const durationMin = Math.round((meeting.duration || 0) / 60);
 
-        // Fetch the full transcript for THIS meeting only (list is metadata-only)
-        let sentences: { text: string; speaker_name: string; start_time: number }[] = [];
-        try {
-          const tData = await firefliesQuery(apiKey, `
-            query($id: String!) {
-              transcript(id: $id) { sentences { text speaker_name start_time } }
-            }
-          `, { id: meeting.id });
-          sentences = tData.transcript?.sentences || [];
-        } catch (err: any) {
-          console.error(`    transcript fetch failed for "${meeting.title}": ${err.message?.slice(0, 80)} — indexing from summary only`);
-        }
+        // Build FULL content for extraction — include transcript if available
+        const sentences = meeting.sentences || [];
         let transcriptText = '';
         let fullTranscript = '';
         if (sentences.length > 0) {

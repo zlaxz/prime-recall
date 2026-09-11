@@ -55,6 +55,46 @@ export async function runQuinnAgent(db: Database.Database): Promise<QuinnResult>
       GROUP BY source
     `).all(lastCycle) as any[];
     const newSummary = newItems.map((n: any) => `${n.source}: ${n.c} new`).join(', ') || 'nothing new';
+    // What Zach told the system since last cycle (email replies, notes, monitor requests)
+    let directives = '';
+    try {
+      const drows = db.prepare("SELECT title, summary FROM knowledge WHERE source='directive' AND created_at > ? ORDER BY created_at DESC LIMIT 10").all(lastCycle) as any[];
+      if (drows.length) directives = drows.map((d: any) => `- ${d.summary.slice(0, 300)}`).join('\n');
+    } catch {}
+
+    // Weekly roster review: code computes the vitality evidence, Quinn makes
+    // the stand-up/retire calls (announce-after). Gated to once per 7 days.
+    let rosterReviewDue = false;
+    let rosterStats = '';
+    try {
+      const lastReviewRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_roster_review'").get() as any)?.value;
+      const lastReview = lastReviewRaw ? new Date(JSON.parse(lastReviewRaw)).getTime() : 0;
+      rosterReviewDue = Date.now() - lastReview > 7 * 24 * 3600000;
+      if (rosterReviewDue) {
+        const days = (d: string | null) => d ? Math.floor((Date.now() - new Date(d).getTime()) / 86400000) : '?';
+        const monitors = db.prepare("SELECT agent_id, project, created_at FROM pm_agents WHERE active = 1 ORDER BY created_at").all() as any[];
+        rosterStats = monitors.map((m: any) => {
+          const run = (db.prepare("SELECT last_run_at FROM agent_state WHERE agent_type='pm' AND subject_id = ?").get(m.project) as any)?.last_run_at || null;
+          const wiki = (db.prepare("SELECT compiled_at FROM compiled_pages WHERE page_type='project' AND subject_id = ?").get(m.project) as any)?.compiled_at || null;
+          const led = db.prepare("SELECT COUNT(*) n, MAX(updated_at) mx FROM ledger WHERE monitor = ? AND status='open' AND tier IN ('act','remind')").get(m.agent_id) as any;
+          return `- ${m.agent_id} (${m.project}): created ${days(m.created_at)}d ago · last ran ${days(run)}d ago · wiki ${days(wiki)}d old · ${led.n} open act/remind · last ledger movement ${days(led.mx)}d ago`;
+        }).join('\n');
+        const retired = db.prepare("SELECT agent_id FROM pm_agents WHERE active = 0").all() as any[];
+        if (retired.length) rosterStats += `\n(retired, reactivatable: ${retired.map((r: any) => r.agent_id).join(', ')})`;
+      }
+    } catch {}
+
+    // Staff proposals awaiting your triage (every cycle)
+    let triageBlock = '';
+    try {
+      const { getUntriagedProposals, quinnApprovalsToday, QUINN_APPROVALS_PER_DAY } = await import('./ledger.js');
+      const pending = getUntriagedProposals(db);
+      if (pending.length) {
+        triageBlock = `## STAFF PROPOSALS AWAITING YOUR TRIAGE (${pending.length}; approvals left today: ${Math.max(0, QUINN_APPROVALS_PER_DAY - quinnApprovalsToday(db))})\n` +
+          pending.map((p: any) => `- id=${String(p.id).slice(0, 8)} [${p.monitor}] ${p.title}\n  plan: ${String(p.next_action || '').slice(0, 220)}`).join('\n') +
+          '\nFor EACH, call prime_triage_proposal: APPROVE internal work that clearly advances an open situation (documents, research, watch items) — never anything that contacts a third party or spends money; ESCALATE what needs Zach\'s judgment, priorities, or authority; DECLINE what is busywork or duplicates existing work. Reason in one line Zach can read. Approvals are announced in your brief ("I approved X — say no to stop it").';
+      }
+    } catch {}
 
     // Build Quinn's prompt — NOT a data dump. Instructions + state + tools.
     const now = new Date();
@@ -73,6 +113,10 @@ export async function runQuinnAgent(db: Database.Database): Promise<QuinnResult>
       newSummary,
       '',
       corrections.length > 0 ? `## CORRECTIONS (absolute truth)\n${corrections.map((c: any) => `- ${c.title}`).join('\n')}` : '',
+      directives ? `## ZACH SAID SINCE LAST CYCLE (email replies / notes — act on these first; a "monitor request" means evaluate prime_create_monitor per SOUL §10)\n${directives}` : '',
+      '',
+      triageBlock,
+      rosterReviewDue ? `## WEEKLY ROSTER REVIEW (due now — act on it this cycle)\nYour monitor roster with vitality stats (cap 8):\n${rosterStats}\n\nDECIDE, per SOUL §10: (1) RETIRE any monitor whose situation concluded or has been dormant 3+ weeks (no open items, no movement) via prime_retire_monitor — announce one line in your brief. (2) STAND UP a monitor for any recurring situation in your briefs/ball-lists that nothing owns, via prime_create_monitor. (3) If nothing changes, say "roster reviewed — no changes" in your brief. This review recurs weekly.` : '',
       '',
       '## YOUR TASK',
       '',
@@ -175,6 +219,11 @@ export async function runQuinnAgent(db: Database.Database): Promise<QuinnResult>
     mkdirSync(cycleDir, { recursive: true });
     const ts = new Date().toISOString().slice(0, 13).replace(/[T:]/g, '-');
     writeFileSync(join(cycleDir, `quinn-${ts}.md`), `# Quinn Agent Cycle — ${dateStr}\n\n${response}`);
+
+    if (rosterReviewDue && /```focus/.test(response)) {  // only a cycle that produced FOCUS counts
+      db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_roster_review', ?, datetime('now'))")
+        .run(JSON.stringify(new Date().toISOString()));
+    }
 
     // Extract FOCUS_UPDATE and write to FOCUS.md
     const focusMatch = response.match(/```focus\n([\s\S]*?)```/);

@@ -19,7 +19,9 @@ import { v4 as uuid } from 'uuid';
 // Uses Sonnet 4.6 (1M context) — good enough for compilation, saves Opus allocation for strategic work.
 // All calls via curl (http.request doesn't wait for tool sessions).
 async function callAgent(prompt: string, maxTurns: number = 50, timeoutSec: number = 600): Promise<string> {
-  const { writeFileSync } = await import('fs');
+  const { writeFileSync, mkdtempSync, rmdirSync } = await import('fs');
+  const { join } = await import('path');
+  const { tmpdir } = await import('os');
   const { promisify } = await import('util');
   const { execFile } = await import('child_process');
   const execFileAsync = promisify(execFile);
@@ -29,10 +31,15 @@ async function callAgent(prompt: string, maxTurns: number = 50, timeoutSec: numb
     timeout: timeoutSec,
     args: ['--model', 'claude-sonnet-4-6', '--max-turns', String(maxTurns)],
   });
-  const tmpPath = `/tmp/wiki-agent-${Date.now()}.json`;
+  // Not a named file in /tmp: it is world-readable, and this body is the full
+  // research prompt. A predictable name there is also pre-creatable by any
+  // local process, so writeFileSync would follow a planted symlink. Same fix
+  // as runClaudeViaProxyCurl in utils/claude-spawn.ts.
+  const tmpDir = mkdtempSync(join(tmpdir(), 'wiki-agent-'));
+  const tmpPath = join(tmpDir, 'body.json');
 
   try {
-    writeFileSync(tmpPath, body);
+    writeFileSync(tmpPath, body, { mode: 0o600 });
     const { stdout } = await execFileAsync('/usr/bin/curl', [
       '-s', '-X', 'POST',
       'http://127.0.0.1:3211/claude',
@@ -46,6 +53,7 @@ async function callAgent(prompt: string, maxTurns: number = 50, timeoutSec: numb
     return parsed.result || '';
   } finally {
     try { const { unlinkSync } = await import('fs'); unlinkSync(tmpPath); } catch {}
+    try { rmdirSync(tmpDir); } catch {}
   }
 }
 

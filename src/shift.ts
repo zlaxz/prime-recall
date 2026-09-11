@@ -13,7 +13,19 @@ import { syncAll } from './connectors/index.js';
 // ============================================================
 
 const CYCLE_INTERVAL = 15 * 60 * 1000;  // 15 minutes
+let tickInFlight = false;
 const HOUR_MS = 60 * 60 * 1000;
+
+// Memory instrumentation (2026-08-31 audit): 3 heap-OOM crashes since Aug 26
+// with no per-phase visibility into where the 8GB gets consumed. Logs RSS/heap
+// at every phase boundary so the next crash's shift.log shows exactly which
+// phase was inflating the heap, and whether growth is within-cycle or
+// accumulating slowly across many ticks in this long-lived process.
+function logMem(label: string) {
+  const m = process.memoryUsage();
+  const mb = (n: number) => (n / 1024 / 1024).toFixed(0);
+  console.log(`[shift]   mem[${label}] rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB external=${mb(m.external)}MB arrayBuffers=${mb(m.arrayBuffers)}MB`);
+}
 
 async function tick() {
   const db = getDb();
@@ -22,11 +34,32 @@ async function tick() {
 
   // Only work between 7am and 10pm
   if (hour < 7 || hour >= 22) {
-    console.log(`[shift] ${now.toLocaleTimeString()} — Off hours. Sleeping.`);
+    // Off hours: no monitors, no Opus — but keep the senses on. Once an hour,
+    // a light sync (email, sent mail, attachments, Zach's replies) so nothing
+    // is 9 hours stale at 7am and a late-night reply still gets its confirmation.
+    // (2026-09-01: serve's overnight sync was removed to stop double-processing;
+    // this replaces it with a single owner.)
+    const lastOffRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_offhours_sync'").get() as any)?.value;
+    const lastOff = lastOffRaw ? new Date(JSON.parse(lastOffRaw)).getTime() : 0;
+    if (Date.now() - lastOff > 55 * 60 * 1000) {
+      console.log(`[shift] ${now.toLocaleTimeString()} — Off hours: light sync.`);
+      try {
+        const syncResults = await syncAll(db);
+        const totalSynced = syncResults.reduce((s, r) => s + r.items, 0);
+        if (totalSynced > 0) console.log(`[shift]   Synced ${totalSynced} items (off hours)`);
+      } catch (err: any) {
+        console.log(`[shift]   Off-hours sync error: ${err.message?.slice(0, 60)}`);
+      }
+      db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_offhours_sync', ?, datetime('now'))")
+        .run(JSON.stringify(new Date().toISOString()));
+    } else {
+      console.log(`[shift] ${now.toLocaleTimeString()} — Off hours. Sleeping.`);
+    }
     return;
   }
 
   console.log(`[shift] ${now.toLocaleTimeString()} — Tick starting...`);
+  logMem('tick-start');
 
   // ── EVERY TICK (15 min): Sync data ──
   try {
@@ -41,12 +74,53 @@ async function tick() {
     console.log(`[shift]   Sync error: ${err.message?.slice(0, 60)}`);
   }
 
+  // Weekends are off: no monitors, no Quinn, no brief, no outbound ledger
+  // email Sat/Sun (Zach, 2026-09-04). Sync and reply handling keep running.
+  const isWeekend = [0, 6].includes(new Date().getDay());
+
+  // ── DAILY EMAIL — tick-level, independent of the 4h cycle (audit fix) ──
+  // Fires on the first tick at/after 7:30 local; window extends to 12:59 so a
+  // crashed/blocked morning cycle still gets a late brief instead of none.
+  if (!isWeekend) try {
+    const lastEmailRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_quinn_email'").get() as any)?.value;
+    const lastEmail = lastEmailRaw ? new Date(JSON.parse(lastEmailRaw)).getTime() : 0;
+    const hoursSinceEmail = (Date.now() - lastEmail) / 3600000;
+    const hr = now.getHours(), mn = now.getMinutes();
+    if (hoursSinceEmail > 20 && (hr > 7 || (hr === 7 && mn >= 30)) && hr <= 12) {
+      const { sendDailyIntelligenceEmail } = await import('./daily-email.js');
+      const sent = await sendDailyIntelligenceEmail(db);
+      if (sent) {
+        db.prepare(
+          "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_quinn_email', ?, datetime('now'))"
+        ).run(JSON.stringify(new Date().toISOString()));
+        console.log('[shift]   Quinn daily email sent');
+      }
+    }
+  } catch (e) {}
+
   // ── HOURLY: Meeting prep + commitment checks ──
   const lastHourlyRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_hourly_check'").get() as any)?.value;
   const lastHourly = lastHourlyRaw ? new Date(JSON.parse(lastHourlyRaw)).getTime() : 0;
 
   if (Date.now() - lastHourly > HOUR_MS) {
     console.log(`[shift]   Running hourly checks...`);
+
+    // Command Center export — living TODAY.md/LEDGER.md for laptop surfaces
+    try {
+      const { exportCommandCenter } = await import('./export-command-center.js');
+      exportCommandCenter(db);
+    } catch (err: any) {
+      console.log('[shift]   Command Center export failed: ' + (err.message || '').slice(0, 60));
+    }
+
+    // Ledger → [ACT]/[REMIND] emails to Zach (scarcity-capped; drafts only, he sends)
+    if (!isWeekend) try {
+      const { dispatchLedger } = await import('./ledger.js');
+      const d = await dispatchLedger(db);
+      if (d.sent || d.bumped) console.log(`[shift]   Ledger: ${d.sent} action/reminder emails, ${d.bumped} bumps`);
+    } catch (err: any) {
+      console.log(`[shift]   Ledger dispatch failed: ${(err.message || '').slice(0, 80)}`);
+    }
 
     // Meeting prep for next 2 hours
     try {
@@ -79,12 +153,7 @@ async function tick() {
         ORDER BY due_date ASC
       `).all() as any[];
 
-      if (urgentCommitments.length > 0) {
-        console.log(`[shift]   ⚠️ ${urgentCommitments.length} commitment(s) due in 24h`);
-        db.prepare(
-          "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('urgent_commitments', ?, datetime('now'))"
-        ).run(JSON.stringify(urgentCommitments));
-      }
+      // commitments tracker retired 2026-09-08 — the ledger owns balls in play
     } catch (e) {}
 
     db.prepare(
@@ -96,7 +165,8 @@ async function tick() {
   const lastFullRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_full_cycle'").get() as any)?.value;
   const lastFull = lastFullRaw ? new Date(JSON.parse(lastFullRaw)).getTime() : 0;
 
-  if (Date.now() - lastFull > 4 * HOUR_MS) {
+  if (isWeekend && Date.now() - lastFull > 4 * HOUR_MS) console.log('[shift]   Weekend — full cycle skipped');
+  if (!isWeekend && Date.now() - lastFull > 4 * HOUR_MS) {
     // Stamp last_full_cycle BEFORE running the heavy work, not after.
     // Otherwise, if the daemon OOMs/crashes mid-cycle (wiki compile, PM agents,
     // Quinn on Opus, etc.), launchd KeepAlive restarts it within 60s and the
@@ -106,32 +176,13 @@ async function tick() {
       "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_full_cycle', ?, datetime('now'))"
     ).run(JSON.stringify(new Date().toISOString()));
 
-    // Promote commitments from knowledge.commitments JSON arrays into the structured
-    // commitments table. Without this, commitment tracking is frozen to whenever
-    // someone last ran \`recall refine\` manually.
-    console.log('[shift]   Extracting commitments (JSON arrays -> structured rows)...');
-    try {
-      const { extractCommitments, updateCommitmentStates } = await import('./ai/commitments.js');
-      const extractResult = await extractCommitments(db, { verbose: false });
-      const stateResult = await updateCommitmentStates(db, { verbose: false });
-      console.log('[shift]   Commitments: ' + extractResult.extracted + ' extracted, ' + extractResult.skipped + ' dedup, states: ' + stateResult.newOverdue + ' overdue, ' + stateResult.newFulfilled + ' fulfilled, ' + stateResult.newDropped + ' dropped');
-    } catch (err: any) {
-      console.log('[shift]   Commitment extraction failed: ' + (err.message || '').slice(0, 80));
-    }
-
-    // Run dream pipeline FIRST (entity profiles, project profiles, commitments)
-    // Intelligence cycle reads these outputs, so they must be fresh
-    console.log('[shift]   Running dream pipeline (project/entity profiles, commitments)...');
-    try {
-      const { runDreamPipeline } = await import('./dream.js');
-      const dreamResult = await runDreamPipeline({ quick: true }); // SQL tasks only — LLM tasks replaced by wiki agents + PMs
-      const succeeded = dreamResult.tasks.filter((t: any) => t.status === 'success').length;
-      const failed = dreamResult.tasks.filter((t: any) => t.status === 'failed').length;
-      console.log('[shift]   Dream: ' + succeeded + ' succeeded, ' + failed + ' failed (' + dreamResult.total_duration.toFixed(0) + 's)');
-    } catch (err: any) {
-      console.log('[shift]   Dream pipeline failed: ' + (err.message || '').slice(0, 60));
-    }
-
+    // Wiki compile + verification: DeepSeek's biggest spenders — once per local
+    // day is all the once-daily monitors and brief actually consume.
+    const wikiDayNow = new Date().toLocaleDateString('en-CA');
+    const lastWikiDay = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_wiki_day'").get() as any)?.value;
+    if (lastWikiDay === wikiDayNow) {
+      console.log('[shift]   Wiki compile + verification: skipped (ran today)');
+    } else {
     // NEW: Wiki compilation via DeepSeek agents (reads actual sources)
     console.log('[shift]   Compiling wiki pages (DeepSeek agents)...');
     try {
@@ -141,35 +192,62 @@ async function tick() {
     } catch (err: any) {
       console.log('[shift]   Wiki compilation failed: ' + (err.message || '').slice(0, 60));
     }
+    logMem('post-wiki-compile');
 
-
-    // NEW: Verification layer — audit wiki claims against actual sources
-    console.log("[shift]   Verifying wiki claims (DeepSeek audit)...");
-    try {
-      const { verifyWikiPages } = await import("./verification.js");
-      const verResult = await verifyWikiPages(db, { maxPages: 3, claimsPerPage: 3 });
-      const rate = verResult.totalClaims > 0 ? Math.round((verResult.verified / verResult.totalClaims) * 100) : 0;
-      console.log("[shift]   Verification: " + verResult.verified + "/" + verResult.totalClaims + " verified (" + rate + "%), " + verResult.incorrect + " flagged (" + (verResult.durationMs / 1000).toFixed(0) + "s)");
-    } catch (err: any) {
-      console.log("[shift]   Verification failed: " + (err.message || "").slice(0, 60));
+    db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_wiki_day', ?, datetime('now'))").run(wikiDayNow);
     }
+    logMem('post-verification');
     // NEW: PM agents (Opus, persistent sessions, active projects only)
     console.log('[shift]   Running PM agents...');
     try {
       const { runPMAgent } = await import('./pm-agent.js');
-      for (const pm of [
-        { project: 'Carefront', agentId: 'carefront-pm' },
-        { project: 'Foresite', agentId: 'foresite-pm' },
-      ]) {
+      // Roster lives in pm_agents — Quinn adds monitors via prime_create_monitor
+      db.exec("CREATE TABLE IF NOT EXISTS pm_agents (agent_id TEXT PRIMARY KEY, project TEXT NOT NULL, active INTEGER DEFAULT 1, created_by TEXT DEFAULT 'system', mandate TEXT, created_at TEXT DEFAULT (datetime('now')))");
+      const roster = db.prepare(
+        "SELECT agent_id, project FROM pm_agents WHERE active = 1 ORDER BY created_at"
+      ).all() as any[];
+      for (const pm of roster.map((r: any) => ({ project: r.project, agentId: r.agent_id }))) {
         try {
+          // Cadence: each monitor runs once per LOCAL day, in the first full cycle
+          // after the 7am wake — fresh for the brief, idle the rest of the day.
+          const lastRunRaw = (db.prepare(
+            "SELECT last_run_at FROM agent_state WHERE subject_id = ? ORDER BY last_run_at DESC LIMIT 1"
+          ).get(pm.project) as any)?.last_run_at;
+          if (lastRunRaw) {
+            const lastLocal = new Date(String(lastRunRaw).replace(' ', 'T') + 'Z').toLocaleDateString('en-CA');
+            const todayLocal = new Date().toLocaleDateString('en-CA');
+            if (lastLocal === todayLocal) {
+              console.log('[shift]   PM ' + pm.agentId + ': skipped (ran today)');
+              continue;
+            }
+            // Delta gate: a quiet inbox means there is nothing for the monitor to learn
+            const fresh = (db.prepare(
+              "SELECT COUNT(*) n FROM knowledge WHERE source IN ('gmail','gmail-sent','fireflies') AND created_at > ?"
+            ).get(lastRunRaw) as any).n;
+            if (!fresh) {
+              console.log('[shift]   PM ' + pm.agentId + ': skipped (no new mail since last run)');
+              continue;
+            }
+          }
           const result = await runPMAgent(db, pm);
           console.log('[shift]   PM ' + pm.agentId + ': done (' + (result.durationMs / 1000).toFixed(0) + 's)');
         } catch (pmErr: any) {
           console.log('[shift]   PM ' + pm.agentId + ' failed: ' + (pmErr.message || '').slice(0, 60));
         }
+        logMem(`post-pm-${pm.agentId}`);
       }
     } catch (err: any) {
       console.log('[shift]   PM agents failed: ' + (err.message || '').slice(0, 60));
+    }
+
+    // PMs just wrote fresh ledger rows — dispatch now instead of waiting
+    // up to an hour for the next hourly gate.
+    try {
+      const { dispatchLedger } = await import('./ledger.js');
+      const d2 = await dispatchLedger(db);
+      if (d2.sent || d2.bumped) console.log(`[shift]   Ledger (post-PM): ${d2.sent} sent, ${d2.bumped} bumps`);
+    } catch (err: any) {
+      console.log('[shift]   Post-PM ledger dispatch failed: ' + (err.message || '').slice(0, 60));
     }
 
     // Quinn Agent — tool-using COS on Opus 4.7
@@ -183,6 +261,7 @@ async function tick() {
     } catch (err: any) {
       console.log('[shift]   Quinn failed: ' + (err.message || '').slice(0, 60));
     }
+    logMem('post-quinn');
 
     // Daily web research — scours internet for relevant articles (20-hour gate)
     console.log('[shift]   Running daily web research...');
@@ -197,26 +276,10 @@ async function tick() {
     } catch (err: any) {
       console.log('[shift]   Research failed: ' + (err.message || '').slice(0, 60));
     }
+    logMem('post-research');
 
-    // Send DAILY intelligence email via Quinn — ONCE per day, morning only
-    try {
-      const lastEmailRaw = (db.prepare("SELECT value FROM graph_state WHERE key = 'last_quinn_email'").get() as any)?.value;
-      const lastEmail = lastEmailRaw ? new Date(JSON.parse(lastEmailRaw)).getTime() : 0;
-      const hoursSinceEmail = (Date.now() - lastEmail) / 3600000;
-      const currentHour = new Date().getHours();
-
-      // Only send if: >20 hours since last email AND it's between 6-9am
-      if (hoursSinceEmail > 20 && currentHour >= 6 && currentHour <= 9) {
-        const { sendDailyIntelligenceEmail } = await import('./daily-email.js');
-        const sent = await sendDailyIntelligenceEmail(db);
-        if (sent) {
-          db.prepare(
-            "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_quinn_email', ?, datetime('now'))"
-          ).run(JSON.stringify(new Date().toISOString()));
-          console.log('[shift]   Quinn daily email sent');
-        }
-      }
-    } catch (e) {}
+    // (daily email moved to tick level — audit 2026-08-31: nested inside the
+    // 4h gate, a crashed morning cycle silently cancelled the brief for the day)
 
     // (last_full_cycle was stamped at the START of this block — see above)
 
@@ -275,17 +338,38 @@ async function tick() {
     } catch (err: any) {
       console.log('[shift]   Wiki lint failed: ' + (err.message || '').slice(0, 60));
     }
+    logMem('post-full-cycle');
 
     // Auto-sync: commit and push any changes after full cycle
     try {
       const { execSync } = await import("child_process");
       const cwd = "/Users/zachstock/GitHub/prime";
+      // A mechanic repair run edits this tree, tests, then commits only its own
+      // files — `git add -A` mid-run commits the untested edit under this message
+      // (3780213 swept ac1d0af's code). scripts/mechanic.sh holds this lock for
+      // the whole run; treat it as dead after the runner's own LOCK_STALE (2h).
+      const { statSync } = await import("fs");
+      let repairRunning = false;
+      try { repairRunning = Date.now() - statSync("/Users/zachstock/.prime/mechanic.lock.d").mtimeMs < 2 * HOUR_MS; } catch {}
       const status = execSync("git status --porcelain", { cwd, encoding: "utf-8" }).trim();
-      if (status) {
+      if (status && repairRunning) {
+        console.log("[shift]   Auto-commit skipped — mechanic repair run in progress");
+      } else if (status) {
         execSync("git add -A", { cwd });
         execSync(`git commit -m "Auto-commit: shift ${new Date().toISOString().slice(0,10)}"`, { cwd });
       }
-      execSync("git push origin main 2>/dev/null || true", { cwd });
+      // This used to be `2>/dev/null || true`, which hid every rejection: GitHub
+      // took a laptop commit (5b6cb67, 2026-04-27) this tree never pulled, and
+      // each push after it was a non-fast-forward reject nobody saw.
+      // ff-only pull first: laptop-only commits merge in cleanly; a genuine
+      // divergence still fails loudly and pages via health-monitor §7e.
+      try { execSync('git pull --ff-only origin main', { cwd, stdio: 'pipe' }); } catch (_e) {}
+      try {
+        execSync("git push origin main", { cwd, encoding: "utf-8", stdio: "pipe" });
+      } catch (e: any) {
+        const why = String(e.stderr || e.message).split("\n").filter((l: string) => l.trim() && !l.startsWith("hint:")).join(" | ");
+        console.log(`[shift]   ⚠️ Auto-push failed: ${why.slice(0, 300)}`);
+      }
     } catch (e) {}
   }
 
@@ -338,24 +422,37 @@ async function tick() {
     }
   } catch (e) {}
 
+  logMem('tick-end');
   console.log(`[shift] ${now.toLocaleTimeString()} — Tick complete.`);
+}
+
+// Full cycles run 40-90 min > the 15-min interval; overlapping ticks
+// double-run syncs/PMs and drive the heap toward the 8GB OOM (audit 2026-08-31).
+async function guardedTick() {
+  if (tickInFlight) { console.log('[shift] Tick skipped — previous tick still running.'); return; }
+  tickInFlight = true;
+  try {
+    await tick();
+  } catch (err: any) {
+    console.error(`[shift] Tick error: ${err.message}`);
+  } finally {
+    tickInFlight = false;
+  }
 }
 
 // ── Main loop ──
 async function main() {
   console.log(`[shift] Prime Shift Daemon starting. Active hours: 7am-10pm. Cycle: ${CYCLE_INTERVAL / 60000} min.`);
 
-  // Run immediately on start
-  await tick();
+  // Run immediately on start. Must go through the same guard as the interval
+  // below — if this lands during the full-cycle gate window it can run 40-90
+  // min, and without the guard the interval fires every 15 min regardless,
+  // stacking 5-6 concurrent syncs/PM-agent-runs on top of it (the exact
+  // startup-vs-interval gap the 2026-08-31 re-entrancy guard didn't cover).
+  await guardedTick();
 
   // Then loop
-  setInterval(async () => {
-    try {
-      await tick();
-    } catch (err: any) {
-      console.error(`[shift] Tick error: ${err.message}`);
-    }
-  }, CYCLE_INTERVAL);
+  setInterval(guardedTick, CYCLE_INTERVAL);
 }
 
 main().catch(err => {

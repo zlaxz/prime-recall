@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { randomUUID } from 'crypto';
+import { registerPrimeSurfaces } from './mcp-surfaces.js';
 
 /**
  * Prime Recall MCP Server
@@ -16,7 +18,6 @@ import { extractIntelligence } from '../ai/extract.js';
 import { askWithSources } from '../ai/ask.js';
 import { generateBriefing } from '../ai/briefing.js';
 import { v4 as uuid } from 'uuid';
-import { executeAction } from '../actions.js';
 
 const MCP_SERVER_CONFIG = {
   name: "prime-recall",
@@ -31,6 +32,10 @@ export { MCP_SERVER_CONFIG };
  * Exported so both stdio (local) and HTTP (remote) can share tool definitions.
  */
 export function registerPrimeTools(srv: McpServer) {
+  // Resources + prompts + activity tool — Prime's hidden work made visible
+  // inside the connector itself (see mcp-surfaces.ts)
+  registerPrimeSurfaces(srv);
+
 
 srv.tool(
   "prime_search",
@@ -529,6 +534,219 @@ srv.tool(
 );
 
 srv.tool(
+  "prime_report_issue",
+  "Report a SYSTEM problem to the Mechanic — Prime's autonomous repair agent that reads logs and source code and fixes infrastructure. Use when your own tooling looks wrong: numbers that contradict what you just read (a contact 'cold 140 days' who emailed yesterday), a tool that errors, a source gone stale, data that should exist and doesn't. Describe what you OBSERVED and the EVIDENCE. Do NOT diagnose the cause and do NOT tell the user what to click — the Mechanic investigates within 5 minutes and emails the user its own report. In your brief, say only that you flagged it.",
+  {
+    observation: z.string().describe("What you saw, concretely: which tool/panel, the values, timestamps"),
+    why_wrong: z.string().describe("The evidence that contradicts it (e.g. 'thread:abc shows an email from him dated 2026-08-24')"),
+    agent: z.string().optional().describe("Who is reporting (default 'quinn')"),
+  },
+  async ({ observation, why_wrong, agent }) => {
+    const db = getDb();
+    // Multi-line text breaks the watchdog's line-based dispatch read
+    observation = observation.replace(/\s*[\r\n]+\s*/g, ' ').trim().slice(0, 1500);
+    why_wrong = (why_wrong || '').replace(/\s*[\r\n]+\s*/g, ' ').trim().slice(0, 1000);
+    db.exec(`CREATE TABLE IF NOT EXISTS system_issues (
+      id TEXT PRIMARY KEY, reported_by TEXT, observation TEXT, why_wrong TEXT,
+      status TEXT DEFAULT 'open', result_status TEXT, report_path TEXT,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))`);
+    const dup = db.prepare(
+      "SELECT id, status FROM system_issues WHERE status IN ('open','dispatched') AND substr(observation,1,80) = substr(?,1,80)"
+    ).get(observation) as any;
+    if (dup) {
+      return { content: [{ type: "text", text: `Already filed as issue ${String(dup.id).slice(0, 8)} (status: ${dup.status}). Do not re-report; check for a 'mechanic-report' item instead.` }] };
+    }
+    const id = randomUUID();
+    db.prepare("INSERT INTO system_issues (id, reported_by, observation, why_wrong) VALUES (?, ?, ?, ?)")
+      .run(id, agent || 'quinn', observation, why_wrong);
+    return { content: [{ type: "text", text: `Issue ${id.slice(0, 8)} filed with the Mechanic. It will investigate within 5 minutes and email Zach its report. In your brief, say only: "Flagged [what] to the mechanic." Keep ignoring the suspect data until a mechanic-report says it's fixed.` }] };
+  }
+);
+
+srv.tool(
+  "prime_create_monitor",
+  "Create a STANDING monitor — a PM agent that investigates its situation every intelligence cycle, maintains a wiki page, tracks statuses/deadlines/next-actions, and feeds Quinn's briefs. Use for a DEVELOPING SITUATION that will play out over weeks: a client with active claims, a deal in motion, a dispute, a renewal season. NOT for one-off research (use prime_spawn_agent). After creating one, announce it in your next brief: 'I stood up a [X] monitor — say kill it if you don't want it.' The monitor runs from the next cycle onward.",
+  {
+    name: z.string().describe("Short monitor name, e.g. 'Behrends Claims' — becomes the wiki page subject"),
+    mandate: z.string().describe("What to monitor and how to help, concretely: the entities/threads to track, what counts as movement, what to maintain (per-claim status, adjuster, deadlines, missing docs, recommended next actions)"),
+    created_by: z.string().optional().describe("Who is creating this (default 'quinn')"),
+  },
+  async ({ name, mandate, created_by }) => {
+    const db = getDb();
+    const { mkdirSync, writeFileSync, existsSync } = await import('fs');
+    const { join } = await import('path');
+    db.exec(`CREATE TABLE IF NOT EXISTS pm_agents (
+      agent_id TEXT PRIMARY KEY, project TEXT NOT NULL, active INTEGER DEFAULT 1,
+      created_by TEXT DEFAULT 'system', mandate TEXT,
+      created_at TEXT DEFAULT (datetime('now')))`);
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40);
+    if (!slug) {
+      return { content: [{ type: "text" as const, text: "Monitor not created: name produced an empty id. Use a short ASCII name." }] };
+    }
+    const agentId = slug.endsWith('-pm') ? slug : `${slug}-pm`;
+    const existing = db.prepare("SELECT agent_id, active FROM pm_agents WHERE agent_id = ? OR project = ?").get(agentId, name) as any;
+    if (existing) {
+      if (!existing.active) db.prepare("UPDATE pm_agents SET active = 1, mandate = ?, created_by = ? WHERE agent_id = ?").run(mandate, created_by || 'quinn', existing.agent_id);
+      return { content: [{ type: "text" as const, text: `Monitor '${existing.agent_id}' already exists${existing.active ? '' : ' (reactivated)'}. It runs every cycle; its wiki page is under project '${name}'.` }] };
+    }
+    const active = db.prepare("SELECT COUNT(*) AS n FROM pm_agents WHERE active = 1").get() as any;
+    if (active.n >= 8) {
+      return { content: [{ type: "text" as const, text: `Not created: ${active.n} monitors already active (cap 8). Propose retiring one in your brief instead.` }] };
+    }
+    const dir = join(process.env.HOME || '', '.prime', 'agents', agentId);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const soul = [
+      `# ${name} Monitor — SOUL`,
+      '',
+      `You are the standing monitor for **${name}**, working for Zach Stock. You run once per intelligence cycle. You are not a summarizer — you are Zach's eyes on a developing situation: track it, catch movement and stalls, and tell him what to do next.`,
+      '',
+      '## Mandate',
+      mandate,
+      '',
+      '## Every cycle',
+      '- Search for what moved since your last cycle (emails, meetings, documents). Retrieve actual sources via prime_retrieve — never reason from summaries alone.',
+      '- Maintain in your wiki page: one section per tracked item (claim/thread/deadline) with current status, owner, last movement date, waiting-on, and the single recommended next action.',
+      '- Flag stalls explicitly: anything waiting >5 business days on an external party gets a nudge recommendation with a draft-ready sentence.',
+      '- Deadlines get a countdown. Missing documents get named.',
+      '',
+      '## Accuracy',
+      'Mark every claim [VERIFIED: source] or [UNVERIFIED: inference]. Verify ownership from actual thread participants before attributing. If your memory conflicts with fresh evidence, the evidence wins.',
+    ].join('\n');
+    writeFileSync(join(dir, 'SOUL.md'), soul);
+    writeFileSync(join(dir, 'CONCERNS.md'), `Initial watch: everything in the mandate. First cycle: build the full picture from history before tracking deltas.\n`);
+    db.prepare("INSERT INTO pm_agents (agent_id, project, created_by, mandate) VALUES (?, ?, ?, ?)")
+      .run(agentId, name, created_by || 'quinn', mandate);
+    return { content: [{ type: "text" as const, text: `✓ Monitor '${agentId}' created for '${name}'. It runs every cycle from the next tick, maintains a wiki page under project '${name}', and feeds your briefs. Announce it to Zach in your next brief: "I stood up a ${name} monitor — say 'kill it' if you don't want it."` }] };
+  }
+);
+
+srv.tool(
+  "prime_purge_drafts",
+  "Purge Zach's unused Gmail drafts. SAFE: moves drafts to Trash (recoverable for 30 days), never permanently deletes. Modes: 'junk' = empty drafts and test-drafts-to-self; 'resolved' = drafts matching a Prime ledger item that is now resolved/dismissed; 'stale' = drafts older than staleDays that match any Prime ledger item. Personal drafts (no ledger match) are NEVER touched. Use dry:true first to preview. If the result is an unauthorized_client error, the service account lacks gmail.modify delegation — Zach must add https://www.googleapis.com/auth/gmail.modify in Workspace Admin > Security > API Controls > Domain-wide delegation.",
+  {
+    mode: z.enum(["junk", "resolved", "stale"]).describe("What to purge"),
+    dry: z.boolean().optional().describe("Preview only — list what would be trashed without trashing (default false)"),
+    staleDays: z.number().optional().describe("For mode 'stale': age threshold in days (default 14)"),
+  },
+  async ({ mode, dry, staleDays }) => {
+    try {
+      const { purgeDrafts } = await import('../draft-purge.js');
+      const r = await purgeDrafts(mode, { dry: !!dry, staleDays: staleDays || 14 });
+      const lines = r.lines.slice(0, 40);
+      lines.push(`[${mode}${dry ? ' DRY' : ''}] trashed:${r.trashed} kept:${r.kept} (Trash keeps them 30 days)`);
+      return { content: [{ type: "text" as const, text: lines.join('\n') }] };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Purge failed: ${String(e?.message || e).slice(0, 300)}` }] };
+    }
+  }
+);
+
+srv.tool(
+  "prime_read_attachment",
+  "Read the CONTENTS of an email attachment on demand — PDF, doc/docx, rtf, txt, csv (NOT xlsx yet; say so if asked). Attachment index cards appear in search results as source 'attachment-index' with a message_id and filename in their summary/metadata. Use this when a task needs what a document actually SAYS — a policy dec page, a signed agreement, loss runs, a filing. Bytes are fetched live from Gmail and extracted; nothing is stored. Scanned PDFs without a text layer return a clear note instead of text.",
+  {
+    message_id: z.string().describe("Gmail message id from the attachment-index card"),
+    filename: z.string().describe("Attachment filename (exact or partial match)"),
+  },
+  async ({ message_id, filename }) => {
+    const db = getDb();
+    const { readAttachment } = await import('../attachments.js');
+    try {
+      const text = await readAttachment(db, message_id, filename);
+      return { content: [{ type: "text" as const, text }] };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Attachment read failed: ${(e.message || '').slice(0, 200)}` }] };
+    }
+  }
+);
+
+srv.tool(
+  "prime_retire_monitor",
+  "Retire (deactivate) a standing monitor whose situation has concluded or gone dormant — resolved claims, closed deals, domains quiet for 3+ weeks with no open ledger items. The agent's files and wiki are KEPT; it simply stops running, freeing a roster slot (cap 8). Announce it in your next brief: 'Retired the X monitor (reason) — say \'bring it back\' to reverse.' Reactivate later via prime_create_monitor with the same name.",
+  {
+    agent_id: z.string().describe("The monitor's agent_id, e.g. 'behrends-claims-pm'"),
+    reason: z.string().describe("One line: why it's being retired (concluded / dormant / superseded)"),
+  },
+  async ({ agent_id, reason }) => {
+    const db = getDb();
+    const row = db.prepare("SELECT agent_id, project, active FROM pm_agents WHERE agent_id = ?").get(agent_id) as any;
+    if (!row) return { content: [{ type: "text" as const, text: `No monitor '${agent_id}' on the roster.` }] };
+    if (!row.active) return { content: [{ type: "text" as const, text: `'${agent_id}' is already retired.` }] };
+    const openItems = (db.prepare("SELECT COUNT(*) n FROM ledger WHERE monitor = ? AND ((status = 'open' AND tier IN ('act','remind')) OR (tier='propose' AND status='accepted'))").get(agent_id) as any).n;
+    if (openItems > 0) {
+      return { content: [{ type: "text" as const, text: `Not retired: '${agent_id}' still has ${openItems} open act/remind ledger item(s). Ask Zach to reply 'done' or 'skip' to those action emails (or say so in chat) so they close, then retire — a monitor with live obligations should not silently vanish.` }] };
+    }
+    db.prepare("UPDATE pm_agents SET active = 0 WHERE agent_id = ?").run(agent_id);
+    db.prepare("INSERT INTO knowledge (id, title, summary, source, source_ref, source_date, created_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))")
+      .run(randomUUID(), `Monitor retired: ${row.project}`, `${agent_id} retired. Reason: ${reason}. Files kept; reactivate via prime_create_monitor with the same name.`, 'agent-notification', `retire:${agent_id}`);
+    return { content: [{ type: "text" as const, text: `✓ '${agent_id}' retired (${reason}). Files kept. Announce in your next brief: "Retired the ${row.project} monitor — ${reason}. Say 'bring it back' to reverse."` }] };
+  }
+);
+
+srv.tool(
+  "prime_accept_proposal",
+  "Accept a staff proposal (a 'propose'-tier ledger item shown as 'STAFF PROPOSALS #n' in the brief or TODAY.md). The proposing monitor executes it on its next cycle and reports it under CLEARED. Identify by the #n shown, or by words from the title.",
+  {
+    which: z.string().describe("The proposal number as shown ('#2' or '2') or distinctive words from its title"),
+    decline: z.boolean().optional().describe("true to DECLINE instead of accept"),
+  },
+  async ({ which, decline }) => {
+    const db = getDb();
+    const { getProposals } = await import('../ledger.js');
+    const open = getProposals(db, 3);
+    if (!open.length) return { content: [{ type: "text" as const, text: "No open staff proposals right now." }] };
+    const n = parseInt(String(which).replace('#', ''), 10);
+    let pick = (!isNaN(n) && n >= 1 && n <= open.length) ? open[n - 1] : null;
+    if (!pick) {
+      const w = String(which).toLowerCase().replace(/[\[\]#]/g, '').trim();
+      pick = open.find((p: any) => String(p.id).toLowerCase().startsWith(w) && w.length >= 4)
+        || open.find((p: any) => String(p.title).toLowerCase().includes(w)) || null;
+    }
+    if (!pick) return { content: [{ type: "text" as const, text: `Couldn't match "${which}". Open proposals: ${open.map((p: any, i: number) => `#${i + 1} ${p.title}`).join(' | ')}` }] };
+    const status = decline ? 'dismissed' : 'accepted';
+    db.prepare("UPDATE ledger SET status=?, updated_at=datetime('now') WHERE id=?").run(status, pick.id);
+    return { content: [{ type: "text" as const, text: decline
+      ? `Declined: "${pick.title}". ${pick.monitor} will not re-propose it.`
+      : `Accepted: "${pick.title}". ${pick.monitor} will do it on its next cycle (within ~4h) and it will show under CLEARED when done.` }] };
+  }
+);
+
+srv.tool(
+  "prime_triage_proposal",
+  "QUINN ONLY. Triage a staff proposal: 'approve' = you authorize the monitor to do it (internal work only: documents, research, watch items — never anything that contacts a third party or spends money; max 2 approvals per day), 'escalate' = it needs Zach's judgment and goes into his brief, 'decline' = not worth doing (give the reason; the monitor will not re-pitch). Everything you approve is announced to Zach in the brief so he can say no.",
+  {
+    proposal_id: z.string().describe("ledger id (or first 8 chars) of the proposal"),
+    decision: z.enum(["approve", "escalate", "decline"]),
+    reason: z.string().describe("One line Zach can read: why"),
+  },
+  async ({ proposal_id, decision, reason }) => {
+    const db = getDb();
+    const { QUINN_APPROVALS_PER_DAY, quinnApprovalsToday } = await import('../ledger.js');
+    const row = db.prepare("SELECT id, title, monitor, status, next_action FROM ledger WHERE tier='propose' AND (id = ? OR id LIKE ? || '%')").get(proposal_id, proposal_id) as any;
+    if (!row) return { content: [{ type: "text" as const, text: `No proposal matching '${proposal_id}'.` }] };
+    if (row.status !== 'open') return { content: [{ type: "text" as const, text: `'${row.title}' is already ${row.status}.` }] };
+    if (decision === 'approve') {
+      if (/email|send|contact|call|wire|pay|sign|submit to|notify (the )?(client|carrier|broker)/i.test(String(row.next_action || '') + ' ' + row.title) && !/draft/i.test(String(row.next_action || ''))) {
+        db.prepare("UPDATE ledger SET status='escalated', triage_note=?, updated_at=datetime('now') WHERE id=?").run(`escalated by rule (outbound/money): ${reason}`.slice(0, 300), row.id);
+        return { content: [{ type: "text" as const, text: `Escalated instead of approved — this touches a third party or money, which is outside your authority. Zach will see it in his brief.` }] };
+      }
+      if (quinnApprovalsToday(db) >= QUINN_APPROVALS_PER_DAY) {
+        db.prepare("UPDATE ledger SET status='escalated', triage_note=?, updated_at=datetime('now') WHERE id=?").run(`escalated: Quinn's daily approval budget used — ${reason}`.slice(0, 300), row.id);
+        return { content: [{ type: "text" as const, text: `Your ${QUINN_APPROVALS_PER_DAY} approvals for today are used — escalated to Zach instead.` }] };
+      }
+      db.prepare("UPDATE ledger SET status='accepted', approved_by='quinn', triage_note=?, updated_at=datetime('now') WHERE id=?").run(reason.slice(0, 300), row.id);
+      return { content: [{ type: "text" as const, text: `Approved: "${row.title}". ${row.monitor} does it next cycle. Announce in your brief: "I approved [X] — say no to stop it."` }] };
+    }
+    if (decision === 'escalate') {
+      db.prepare("UPDATE ledger SET status='escalated', triage_note=?, updated_at=datetime('now') WHERE id=?").run(reason.slice(0, 300), row.id);
+      return { content: [{ type: "text" as const, text: `Escalated to Zach: "${row.title}".` }] };
+    }
+    db.prepare("UPDATE ledger SET status='dismissed', approved_by='quinn', triage_note=?, updated_at=datetime('now') WHERE id=?").run(`declined by Quinn: ${reason}`.slice(0, 300), row.id);
+    return { content: [{ type: "text" as const, text: `Declined: "${row.title}" (${reason}). The monitor will not re-pitch it.` }] };
+  }
+);
+
+srv.tool(
   "prime_notify",
   "Send a notification to the user. Routes by urgency: CRITICAL → iMessage + email, HIGH → iMessage, NORMAL → email, FYI → save only. Use when an agent has something important to communicate.",
   {
@@ -541,6 +759,13 @@ srv.tool(
   },
   async ({ title, body, urgency, agent, project, action_required }) => {
     const db = getDb();
+    // Monitors have no send authority: their notices ride in the brief, never the inbox
+    if (agent && /-pm$/i.test(agent)) {
+      const { randomUUID: ru } = await import('crypto');
+      db.prepare("INSERT INTO knowledge (id, title, summary, source, source_ref, source_date, created_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))")
+        .run(ru(), `[${agent}] ${title}`.slice(0, 200), `${body}${action_required ? `\nAction: ${action_required}` : ''}`.slice(0, 2000), 'agent-report', `notify:${agent}:${Date.now()}`);
+      return { content: [{ type: "text" as const, text: `Logged for the morning brief (monitors do not email Zach directly). If it needs action, put it in your LEDGER block as an act/remind item with a draft.` }] };
+    }
     const { notify } = await import('../notify.js');
     const result = await notify(db, {
       title, body, urgency: urgency as any,
@@ -1010,65 +1235,7 @@ srv.tool(
   }
 );
 
-// ── Staged Actions: The bridge from intelligence to execution ────
-
-srv.tool(
-  "prime_staged_actions",
-  "List pending prepared actions from the dream pipeline. These are ready-to-execute actions (draft emails, calendar blocks) that the user can approve with one click.",
-  {},
-  async () => {
-    try {
-      const db = getDb();
-      const actions = db.prepare(
-        "SELECT id, type, summary, reasoning, project, created_at FROM staged_actions WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > datetime('now')) ORDER BY id ASC"
-      ).all() as any[];
-
-      if (actions.length === 0) {
-        return { content: [{ type: "text" as const, text: "No pending actions. Run the dream pipeline to generate recommendations." }] };
-      }
-
-      const lines = actions.map((a: any, i: number) =>
-        `${i + 1}. [${a.type.toUpperCase()}] ${a.summary}\n   Why: ${a.reasoning || 'N/A'}\n   Project: ${a.project || 'general'}\n   ID: ${a.id}`
-      ).join('\n\n');
-
-      return { content: [{ type: "text" as const, text: `📋 PENDING ACTIONS (${actions.length}):\n\n${lines}\n\nApprove with: prime_approve_action({id: N})` }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `✗ Error: ${err.message}` }] };
-    }
-  }
-);
-
-srv.tool(
-  "prime_approve_action",
-  "Approve and execute a staged action. The system sends the email, creates the calendar event, or executes the prepared action.",
-  {
-    id: z.number().describe("The staged action ID to approve"),
-  },
-  async ({ id }) => {
-    const db = getDb();
-    const result = await executeAction(db, id);
-    const prefix = result.success ? '✓' : '✗';
-    return { content: [{ type: "text" as const, text: `${prefix} ${result.message}` }] };
-  }
-);
-
-srv.tool(
-  "prime_reject_action",
-  "Reject a staged action. Records the rejection for the feedback loop — the system learns not to recommend similar actions.",
-  {
-    id: z.number().describe("The staged action ID to reject"),
-    reason: z.string().optional().describe("Why rejected (helps the system learn)"),
-  },
-  async ({ id, reason }) => {
-    try {
-      const db = getDb();
-      db.prepare("UPDATE staged_actions SET status = 'rejected', acted_at = datetime('now') WHERE id = ? AND status = 'pending'").run(id);
-      return { content: [{ type: "text" as const, text: `✓ Action ${id} rejected.${reason ? ' Reason: ' + reason : ''} The system will learn from this.` }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `✗ Error: ${err.message}` }] };
-    }
-  }
-);
+// (staged-actions tools retired 2026-09-08 — dead since April; ledger+proposals replaced them)
 
 // ── Sampling-powered investigation (uses Claude Desktop's own LLM) ────
 
