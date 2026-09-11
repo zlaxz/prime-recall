@@ -128,10 +128,17 @@ export async function runClaude(prompt: string, options: {
     const result = await runClaudeViaProxy(prompt, options);
     return result;
   } catch (err: any) {
-    // "proxy busy" means the proxy answered and is serialising claude children.
-    // Falling back to a direct spawn here would run a SECOND claude concurrently,
-    // which is the OAuth-refresh race the proxy's gate exists to prevent.
-    if (String(err?.message || '').includes('proxy busy')) throw err;
+    // Fall back ONLY when nothing is listening on 3211 (curl exit 7) — the
+    // laptop case this fallback exists for. Any other failure means the proxy
+    // took the request: 503 busy, 504 timeout, a non-zero claude exit, curl's
+    // --max-time (28), a dropped connection. The proxy's claude may still be
+    // running, or the next caller's is about to get the gate, so a direct spawn
+    // here is a SECOND concurrent claude — the OAuth-refresh race the proxy's
+    // gate (9b45d1a) exists to prevent. Until this only "proxy busy" was
+    // excluded, and every Quinn cycle that hit its 895s proxy timeout was
+    // relaunched directly for another 900s, on opus-4-6 (spawnClaude drops
+    // `model`), beside whatever claude the proxy ran next.
+    if (err?.code !== 7) throw err;
     // Proxy unavailable — fall back to direct claude -p (works on laptop)
   }
 
