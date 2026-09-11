@@ -29,20 +29,25 @@ export function buildClaudeCommand(options: {
   extraArgs?: string[];
   outputFormat?: 'json' | 'text';
   maxTurns?: number;
+  model?: string;
 } = {}): { cmd: string; args: string[] } {
   const useGui = false; // NEVER use GUI wrapper
   const extra = options.extraArgs || [];
+  // The caller's model wins, as it already does on the proxy path
+  // (runClaudeViaProxy); opus-4-6 (e0443ef) stays the default for callers
+  // that name none.
+  const model = options.model || 'claude-opus-4-6';
 
   if (useGui) {
     // GUI wrapper: reads prompt from stdin, passes args through
-    const args: string[] = ['--model', 'claude-opus-4-6'];
+    const args: string[] = ['--model', model];
     if (options.sessionId) args.push('--resume', options.sessionId);
     if (options.maxTurns) args.push('--max-turns', String(options.maxTurns));
     args.push(...extra);
     return { cmd: GUI_WRAPPER, args };
   } else {
     // Direct CLI
-    const args: string[] = ['-p', '--model', 'claude-opus-4-6'];
+    const args: string[] = ['-p', '--model', model];
     if (options.sessionId) args.push('--resume', options.sessionId);
     if (options.outputFormat === 'json') args.push('--output-format', 'json');
     if (options.maxTurns) args.push('--max-turns', String(options.maxTurns));
@@ -83,6 +88,7 @@ export function spawnClaude(options: {
   outputFormat?: 'json' | 'text';
   maxTurns?: number;
   timeout?: number;
+  model?: string;
   detached?: boolean;
   stdio?: 'pipe' | 'ignore';
 } = {}): ChildProcess {
@@ -136,8 +142,8 @@ export async function runClaude(prompt: string, options: {
     // here is a SECOND concurrent claude — the OAuth-refresh race the proxy's
     // gate (9b45d1a) exists to prevent. Until this only "proxy busy" was
     // excluded, and every Quinn cycle that hit its 895s proxy timeout was
-    // relaunched directly for another 900s, on opus-4-6 (spawnClaude drops
-    // `model`), beside whatever claude the proxy ran next.
+    // relaunched directly for another 900s, on opus-4-6 (spawnClaude then
+    // dropped `model`), beside whatever claude the proxy ran next.
     if (err?.code !== 7) throw err;
     // Proxy unavailable — fall back to direct claude -p (works on laptop)
   }
