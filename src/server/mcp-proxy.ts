@@ -50,13 +50,30 @@ async function getServer(): Promise<string | null> {
   return null;
 }
 
+// Auth header for the Mac Mini's serve. Set via Claude Desktop's MCP env block
+// (claude_desktop_config.json -> mcpServers.prime-recall.env.PRIME_API_KEY).
+// The serve enforces this on all /api/* routes except /api/health, /api/status,
+// and /mcp/*. Without it the proxy gets {"error":"unauthorized"} on most calls
+// and silently shows empty results because most tool handlers do
+// `(result.foo || []).map(...)` — only prime_search surfaces the JSON error.
+const API_KEY = process.env.PRIME_API_KEY || '';
+const authHeaders: Record<string, string> = API_KEY ? { 'X-API-Key': API_KEY } : {};
+
 /**
  * HTTP GET with timeout. Returns parsed JSON or null.
  */
 function httpGet(url: string, timeout = 60000): Promise<any> {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, { timeout }, (res) => {
+    const parsed = new URL(url);
+    const req = mod.request({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname + parsed.search,
+      method: 'GET',
+      timeout,
+      headers: authHeaders,
+    }, (res) => {
       let data = '';
       res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
       res.on('end', () => {
@@ -66,6 +83,7 @@ function httpGet(url: string, timeout = 60000): Promise<any> {
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.end();
   });
 }
 
@@ -87,6 +105,7 @@ function httpPost(url: string, body: any, timeout = 30000): Promise<any> {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
+        ...authHeaders,
       },
     }, (res) => {
       let data = '';
