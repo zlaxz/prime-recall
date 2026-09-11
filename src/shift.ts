@@ -344,8 +344,17 @@ async function tick() {
     try {
       const { execSync } = await import("child_process");
       const cwd = "/Users/zachstock/GitHub/prime";
+      // A mechanic repair run edits this tree, tests, then commits only its own
+      // files — `git add -A` mid-run commits the untested edit under this message
+      // (3780213 swept ac1d0af's code). scripts/mechanic.sh holds this lock for
+      // the whole run; treat it as dead after the runner's own LOCK_STALE (2h).
+      const { statSync } = await import("fs");
+      let repairRunning = false;
+      try { repairRunning = Date.now() - statSync("/Users/zachstock/.prime/mechanic.lock.d").mtimeMs < 2 * HOUR_MS; } catch {}
       const status = execSync("git status --porcelain", { cwd, encoding: "utf-8" }).trim();
-      if (status) {
+      if (status && repairRunning) {
+        console.log("[shift]   Auto-commit skipped — mechanic repair run in progress");
+      } else if (status) {
         execSync("git add -A", { cwd });
         execSync(`git commit -m "Auto-commit: shift ${new Date().toISOString().slice(0,10)}"`, { cwd });
       }
