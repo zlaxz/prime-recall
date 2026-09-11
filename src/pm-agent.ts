@@ -120,10 +120,17 @@ async function callProxy(prompt: string, maxTurns: number, timeoutSec: number): 
   const args = ['--model', 'claude-sonnet-5', '--max-turns', String(maxTurns)]; // monitors: routine investigation — Sonnet 5; Quinn keeps Opus
 
   const body = JSON.stringify({ prompt, timeout: timeoutSec, args });
-  const tmpPath = `/tmp/pm-proxy-${Date.now()}.json`;
+  // Not a named file in /tmp: it is world-readable, and this body is the full
+  // PM prompt (mail, deals, contacts). A predictable name there is also
+  // pre-creatable by any local process, so writeFileSync would follow a planted
+  // symlink. Same fix as runClaudeViaProxyCurl in utils/claude-spawn.ts.
+  const { mkdtempSync, rmdirSync } = await import('fs');
+  const { tmpdir } = await import('os');
+  const tmpDir = mkdtempSync(join(tmpdir(), 'pm-proxy-'));
+  const tmpPath = join(tmpDir, 'body.json');
 
   try {
-    writeFileSync(tmpPath, body);
+    writeFileSync(tmpPath, body, { mode: 0o600 });
     const { stdout } = await execFileAsync('/usr/bin/curl', [
       '-s', '-X', 'POST',
       'http://127.0.0.1:3211/claude',
@@ -140,6 +147,7 @@ async function callProxy(prompt: string, maxTurns: number, timeoutSec: number): 
     return { result: parsed.result || '', sessionId: parsed.session_id || '' };
   } finally {
     try { const { unlinkSync } = await import('fs'); unlinkSync(tmpPath); } catch {}
+    try { rmdirSync(tmpDir); } catch {}
   }
 }
 
