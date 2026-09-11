@@ -342,6 +342,26 @@ else
   clear_alert "$MSG_STALEENV"
 fi
 
+# ── 7e. GitHub has moved on without this machine (hourly) ──
+# shift's auto-push only pushes, never pulls, and discarded git's stderr until
+# 2026-09-10. A laptop commit (5b6cb67, 2026-04-27) this tree never pulled made
+# every push after it a non-fast-forward reject, so every commit from
+# 2026-07-09 on stayed on this Mac Mini only. While GitHub's main is not in
+# local main, no push can land until someone merges it.
+MSG_PUSH="GitHub main has commits this Mac Mini never pulled, so the shift auto-push is rejected every cycle and this machine's commits are not reaching GitHub. Fix: cd ~/GitHub/prime && git pull --no-rebase --no-edit origin main && git push origin main"
+if [ "$(date +%M)" -lt 5 ]; then
+  REMOTE_MAIN=$(GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
+  if [ -z "$REMOTE_MAIN" ]; then
+    log "git: could not read GitHub main (network or auth) — push check skipped"
+  elif git merge-base --is-ancestor "$REMOTE_MAIN" main 2>/dev/null; then
+    clear_alert "$MSG_PUSH"
+  else
+    log "git: GitHub main ${REMOTE_MAIN:0:7} is not in local main; $(git rev-list --count main --not "$REMOTE_MAIN" 2>/dev/null || echo '?') local commits cannot be pushed"
+    alert "$MSG_PUSH"
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
+
 # ── 8. Tunnel (best-effort restart, no alert) ──────────
 if ! pgrep -f "cloudflared" >/dev/null 2>&1; then
   log "tunnel down — restarting"; restart_daemon "com.prime-recall.tunnel"
@@ -366,6 +386,9 @@ if [ -x "$MECH" ]; then
     # Stale launchd env needs bootout+bootstrap or a reboot — outside the
     # mechanic's walls, and the alert already carries the fix for Zach.
     grep -q "LOADED launchd job definition" "$f" 2>/dev/null && continue
+    # Reconciling with GitHub means a merge + push — the mechanic may not push,
+    # and the alert already carries the commands for Zach.
+    grep -q "shift auto-push is rejected" "$f" 2>/dev/null && continue
     AGE=$(( NOW - $(stat -f %m "$f") ))
     [ "$AGE" -ge 900 ] || continue
     if [ -f "$f.dispatched" ] && [ $(( NOW - $(stat -f %m "$f.dispatched") )) -lt 21600 ]; then continue; fi

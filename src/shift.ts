@@ -358,7 +358,16 @@ async function tick() {
         execSync("git add -A", { cwd });
         execSync(`git commit -m "Auto-commit: shift ${new Date().toISOString().slice(0,10)}"`, { cwd });
       }
-      execSync("git push origin main 2>/dev/null || true", { cwd });
+      // This used to be `2>/dev/null || true`, which hid every rejection: GitHub
+      // took a laptop commit (5b6cb67, 2026-04-27) this tree never pulled, and
+      // each push after it was a non-fast-forward reject nobody saw. This only
+      // pushes, never pulls — health-monitor.sh §7e alerts Zach to reconcile.
+      try {
+        execSync("git push origin main", { cwd, encoding: "utf-8", stdio: "pipe" });
+      } catch (e: any) {
+        const why = String(e.stderr || e.message).split("\n").filter((l: string) => l.trim() && !l.startsWith("hint:")).join(" | ");
+        console.log(`[shift]   ⚠️ Auto-push failed: ${why.slice(0, 300)}`);
+      }
     } catch (e) {}
   }
 
