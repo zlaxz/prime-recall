@@ -136,6 +136,10 @@ fi  # end busy-skip guard
 
 # ── 2b. Agents can actually use MCP tools (hourly) ─────
 if [ "$(date +%M)" -lt 5 ]; then
+# Same busy-skip as §2: a probe queued behind a 15-min agent is not a tool test.
+if pgrep -f "/opt/homebrew/bin/claude" >/dev/null 2>&1; then
+  log "claude busy with an agent run — skipping MCP tool probe"
+else
   TOOLS=$(curl -s --max-time 150 -X POST http://127.0.0.1:3211/claude \
     -H "Content-Type: application/json" \
     -d '{"prompt":"Call the prime_status MCP tool and reply with ONLY the total knowledge item count as a number. If the tool is unavailable reply exactly: NO_TOOLS","timeout":120}' 2>/dev/null)
@@ -143,6 +147,13 @@ if [ "$(date +%M)" -lt 5 ]; then
   # wrapper (session ids) made the old grep false-pass (audit finding).
   if echo "$TOOLS" | grep -qi "proxy busy"; then
     log "MCP tool probe deferred — proxy busy with a long agent run"
+  elif echo "$TOOLS" | grep -qE '"error":"timeout after ([0-9]|[0-9][0-9]|1[01][0-9])s"'; then
+    # The proxy charges gate-queue time against the run (remainingBudget), so an
+    # agent that starts between pgrep and curl leaves the probe a few seconds to
+    # run claude and it 504s — "timeout after 4s" raised this alert on
+    # 2026-09-10 while every agent was calling prime tools. Only a 504 with the
+    # full 120s budget means claude itself hung.
+    log "MCP tool probe deferred — queued behind an agent, $(echo "$TOOLS" | cut -c1-60)"
   elif echo "$TOOLS" | python3 -c '
 import json, sys, re
 try: d = json.load(sys.stdin)
@@ -155,6 +166,7 @@ sys.exit(0 if d.get("exit_code") == 0 and "NO_TOOLS" not in r and re.search(r"[0
     alert "$MSG_TOOLS"
     ISSUES=$((ISSUES + 1))
   fi
+fi  # end busy-skip guard
 fi
 
 # ── 3. shift daemon alive ──────────────────────────────
