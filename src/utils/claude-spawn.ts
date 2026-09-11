@@ -110,6 +110,19 @@ export async function runClaude(prompt: string, options: {
   timeout?: number;
   model?: string;
 } = {}): Promise<string> {
+  // A claude the proxy spawned holds the proxy's single claudeGate for its whole
+  // run, and every MCP tool it calls runs in a descendant of that claude — so a
+  // proxy call from here queues behind its own ancestor and can only ever end in
+  // "proxy busy" after its full timeout. prime_search reranks this way: since
+  // 9b45d1a serialised claude children every search stalled ~120s, and PM/Quinn
+  // runs spent their whole 900s budget waiting on their own searches. launchd
+  // puts the job label in the proxy's environment and the proxy hands that
+  // environment to claude. Fail fast with the same "proxy busy" the caller would
+  // have got — and never fall back to a direct spawn, a second concurrent claude.
+  if (process.env.XPC_SERVICE_NAME === 'com.prime.claude-proxy') {
+    throw new Error('proxy busy — called from inside a proxy-run claude session, which already holds the gate this call would wait for');
+  }
+
   // Try proxy first — works on Mac Mini where direct claude -p can't access Keychain
   try {
     const result = await runClaudeViaProxy(prompt, options);
