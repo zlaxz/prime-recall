@@ -237,9 +237,14 @@ export async function retrieveGmailAttachments(
         } else if (ext.endsWith('.docx') || ext.endsWith('.doc')) {
           // macOS textutil converts Word docs to text
           const { execSync } = await import('child_process');
-          const { writeFileSync, unlinkSync } = await import('fs');
-          const tmpPath = `/tmp/prime_attachment_${Date.now()}.docx`;
-          writeFileSync(tmpPath, buffer);
+          const { writeFileSync, unlinkSync, mkdtempSync, rmdirSync } = await import('fs');
+          const { tmpdir } = await import('os');
+          const { join } = await import('path');
+          // Private 0700 dir + 0600 file: a bare /tmp path left raw email
+          // attachments world-readable (0644 under launchd's umask).
+          const tmpDir = mkdtempSync(join(tmpdir(), 'prime-attachment-'));
+          const tmpPath = join(tmpDir, 'attachment.docx');
+          writeFileSync(tmpPath, buffer, { mode: 0o600 });
           try {
             const { spawnSync } = await import('child_process');
             const r = spawnSync('textutil', ['-convert', 'txt', '-stdout', tmpPath], { timeout: 10000 });
@@ -248,11 +253,15 @@ export async function retrieveGmailAttachments(
             text = `[Could not extract text from ${part.filename}]`;
           }
           try { unlinkSync(tmpPath); } catch (_e) {}
+          try { rmdirSync(tmpDir); } catch (_e) {}
         } else if (ext.endsWith('.pdf')) {
           const { spawnSync } = await import('child_process');
-          const { writeFileSync, unlinkSync } = await import('fs');
-          const tmpPath = `/tmp/prime_attachment_${Date.now()}.pdf`;
-          writeFileSync(tmpPath, buffer);
+          const { writeFileSync, unlinkSync, mkdtempSync, rmdirSync } = await import('fs');
+          const { tmpdir } = await import('os');
+          const { join } = await import('path');
+          const tmpDir = mkdtempSync(join(tmpdir(), 'prime-attachment-'));
+          const tmpPath = join(tmpDir, 'attachment.pdf');
+          writeFileSync(tmpPath, buffer, { mode: 0o600 });
           try {
             // Use spawn with array args — prevents command injection via tmpPath
             const pdfScript = `
@@ -271,6 +280,7 @@ except:
             text = `[Could not extract text from ${part.filename}]`;
           }
           try { unlinkSync(tmpPath); } catch (_e) {}
+          try { rmdirSync(tmpDir); } catch (_e) {}
         }
 
         if (text && text.length > 10) {

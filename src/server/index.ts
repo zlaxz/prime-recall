@@ -878,17 +878,21 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
       } catch { /* non-critical */ }
 
       // Use curl for proxy calls — http.request doesn't wait for multi-turn tool sessions
-      const { writeFileSync, unlinkSync } = await import('fs');
+      const { writeFileSync, unlinkSync, mkdtempSync, rmdirSync } = await import('fs');
+      const { tmpdir } = await import('os');
       const { promisify } = await import('util');
       const { execFile } = await import('child_process');
       const execFileAsync = promisify(execFile);
 
       const body = JSON.stringify({ message, session_id: session_id || '', timeout: 120 });
-      const tmpPath = `/tmp/prime-chat-${Date.now()}.json`;
+      // Not a bare /tmp path: that was 0644 under launchd's umask with a
+      // clock-guessable, symlink-followable name, and it holds Zach's message.
+      const tmpDir = mkdtempSync(join(tmpdir(), 'prime-chat-'));
+      const tmpPath = join(tmpDir, 'body.json');
 
       let result: any;
       try {
-        writeFileSync(tmpPath, body);
+        writeFileSync(tmpPath, body, { mode: 0o600 });
         const { stdout } = await execFileAsync('/usr/bin/curl', [
           '-s', '-X', 'POST', 'http://127.0.0.1:3211/prime',
           '-H', 'Content-Type: application/json',
@@ -899,6 +903,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
         catch { result = { content: stdout, session_id: '' }; }
       } finally {
         try { unlinkSync(tmpPath); } catch {}
+        try { rmdirSync(tmpDir); } catch {}
       }
 
       // Store Quinn's response in KB for agent access

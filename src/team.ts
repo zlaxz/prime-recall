@@ -575,12 +575,17 @@ export async function runAgent(
   // Run agent via claude -p (Max subscription, OAuth, free)
   // CRITICAL: unset ANTHROPIC_API_KEY so claude uses OAuth, not the stale API key
   // GUI wrapper handles Mac Mini headless Keychain access automatically.
-  const { writeFileSync: writeTmp, unlinkSync: unlinkTmp } = await import('fs');
-  const { tmpdir } = await import('os');
-  const promptPath = join(tmpdir(), `prime-agent-${name}-${Date.now()}.txt`);
-  writeTmp(promptPath, prompt);
-
   if (background) {
+    // spawnClaudeBackground deletes promptPath itself, so a mkdtemp dir would be
+    // left behind empty; a random name + O_EXCL ('wx') + 0600 protects the same
+    // way. The old `prime-agent-<name>-<ms>.txt` was 0644 under launchd's umask
+    // with a guessable name, so a planted symlink would have been followed. The
+    // foreground branch never read the file, so it no longer writes one.
+    const { tmpdir } = await import('os');
+    const { randomUUID } = await import('crypto');
+    const promptPath = join(tmpdir(), `prime-agent-${randomUUID()}.txt`);
+    writeFileSync(promptPath, prompt, { mode: 0o600, flag: 'wx' });
+
     await spawnClaudeBackground({
       promptPath,
       extraArgs: ['--allowedTools', 'mcp__prime-recall__*'],
@@ -600,10 +605,8 @@ export async function runAgent(
       agent.last_report = stdout.slice(0, 500);
       saveAgent(agent);
 
-      try { unlinkTmp(promptPath); } catch (_e) {}
       return { status: 'completed', output: stdout };
     } catch (err: any) {
-      try { unlinkTmp(promptPath); } catch (_e) {}
       return { status: 'error', output: err.message?.slice(0, 500) };
     }
   }

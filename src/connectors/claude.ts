@@ -174,13 +174,15 @@ export async function extractSessionKey(): Promise<string | null> {
 
     // Step 2: Read the encrypted cookie from SQLite
     // We shell out to Python because Node's sqlite bindings are async
-    // and the cookie decryption requires PBKDF2 + AES which Python handles cleanly
-    const { writeFileSync, unlinkSync } = await import('fs');
-    const { tmpdir } = await import('os');
-    const scriptPath = join(tmpdir(), `prime-decrypt-${Date.now()}.py`);
+    // and the cookie decryption requires PBKDF2 + AES which Python handles cleanly.
+    // The Keychain key goes in on stdin, never into the script: the script used to
+    // be written to /tmp/prime-decrypt-<ms>.py (0644 under launchd's umask) with the
+    // key embedded, readable by any local process while it ran. argv (`ps ww`)
+    // only ever sees the key-free script.
+    const { execFileSync } = await import('child_process');
 
     const script = [
-      'import sqlite3, hashlib, re',
+      'import sqlite3, hashlib, re, sys',
       'from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes',
       '',
       `db = sqlite3.connect('${cookieDb}')`,
@@ -196,7 +198,7 @@ export async function extractSessionKey(): Promise<string | null> {
       '    print("BAD_FORMAT")',
       '    exit()',
       '',
-      `password_str = '${encryptionKey}'`,
+      'password_str = sys.stdin.read()',
       "key = hashlib.pbkdf2_hmac('sha1', password_str.encode('utf-8'), b'saltysalt', 1003, dklen=16)",
       'encrypted_data = encrypted[3:]',
       "iv = b' ' * 16",
@@ -212,17 +214,11 @@ export async function extractSessionKey(): Promise<string | null> {
       '    print("NO_KEY_FOUND")',
     ].join('\n');
 
-    writeFileSync(scriptPath, script);
-
-    let result: string;
-    try {
-      result = execSync(`python3 "${scriptPath}"`, {
-        encoding: 'utf-8',
-        timeout: 10000,
-      }).trim();
-    } finally {
-      try { unlinkSync(scriptPath); } catch (_e) {}
-    }
+    const result = execFileSync('python3', ['-c', script], {
+      input: encryptionKey,
+      encoding: 'utf-8',
+      timeout: 10000,
+    }).trim();
 
     if (result.startsWith('sk-ant-')) {
       return result;

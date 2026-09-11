@@ -9,7 +9,9 @@
 import Database from 'better-sqlite3';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, unlinkSync } from 'fs';
+import { writeFileSync, unlinkSync, mkdtempSync, rmdirSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { v4 as uuid } from 'uuid';
 import { insertKnowledge } from './db.js';
 import { ensureLedger } from './ledger.js';
@@ -66,9 +68,13 @@ async function askModel(text: string, ctx: IntentContext): Promise<Plan | null> 
   ].filter(l => l !== '').join('\n');
 
   const body = JSON.stringify({ prompt, timeout: 90, args: ['--max-turns', '1'] });
-  const tmp = `/tmp/intent-${Date.now()}-${Math.floor(Math.random() * 1e6)}.json`;
+  // Private 0700 dir + 0600 file: a bare /tmp path was 0644 under launchd's
+  // umask, and this body carries Zach's reply and the email it answers.
+  let tmpDir = '';
   try {
-    writeFileSync(tmp, body);
+    tmpDir = mkdtempSync(join(tmpdir(), 'intent-'));
+    const tmp = join(tmpDir, 'body.json');
+    writeFileSync(tmp, body, { mode: 0o600 });
     const { stdout } = await execFileAsync('/usr/bin/curl', [
       '-s', '-X', 'POST', 'http://127.0.0.1:3211/claude',
       '-H', 'Content-Type: application/json', '-d', `@${tmp}`, '--max-time', '120',
@@ -82,7 +88,12 @@ async function askModel(text: string, ctx: IntentContext): Promise<Plan | null> 
     if (!Array.isArray(plan.steps)) return null;
     return plan;
   } catch { return null; }
-  finally { try { unlinkSync(tmp); } catch {} }
+  finally {
+    if (tmpDir) {
+      try { unlinkSync(join(tmpDir, 'body.json')); } catch {}
+      try { rmdirSync(tmpDir); } catch {}
+    }
+  }
 }
 
 // ── Execution: deterministic, validated against context ──
