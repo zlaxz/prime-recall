@@ -267,8 +267,21 @@ export async function spawnClaudeBackground(options: {
       try { const { unlinkSync } = await import('fs'); unlinkSync(options.promptPath); } catch (_e) {}
     }
     return;
-  } catch {
-    // Proxy unavailable — fall back to direct spawn
+  } catch (err: any) {
+    // Fall back ONLY when nothing is listening on 3211 — the laptop case, same
+    // rule as runClaude (fe9f5f0). The proxy answers a background request only
+    // once it holds claudeGate, which it waits `timeout` for, so a live proxy
+    // with a busy gate used to look like a dead one to the 5s client timeout:
+    // the direct detached claude ran beside the proxy's (the OAuth race
+    // 9b45d1a serialises children to prevent), then the proxy got the gate and
+    // ran the same agent a second time. prime_spawn_agent is called from inside
+    // proxy-run sessions, where the gate is always held.
+    if (err?.code !== 'ECONNREFUSED') {
+      if (options.promptPath) {
+        try { const { unlinkSync } = await import('fs'); unlinkSync(options.promptPath); } catch (_e) {}
+      }
+      throw err;
+    }
   }
 
   // Direct spawn fallback (laptop / no proxy)
@@ -307,6 +320,7 @@ async function spawnClaudeBackgroundViaProxy(prompt: string, extraArgs?: string[
   const body = JSON.stringify({ prompt, timeout: 300, args, background: true });
 
   return new Promise((resolve, reject) => {
+    let sent = false;
     const req = httpRequest({
       hostname: '127.0.0.1',
       port: 3211,
@@ -325,9 +339,17 @@ async function spawnClaudeBackgroundViaProxy(prompt: string, extraArgs?: string[
       }
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Proxy timeout')); });
+    // No reply within 5s after the whole body was sent means the proxy has the
+    // request and is queued on claudeGate — it spawns the agent when the gate
+    // frees (within `timeout`), whether or not this socket is still open.
+    // Treat that as accepted; only an unsent body is a failure.
+    req.on('timeout', () => {
+      req.destroy();
+      if (sent) resolve();
+      else reject(new Error('Proxy timeout before the request was sent'));
+    });
     req.write(body);
-    req.end();
+    req.end(() => { sent = true; });
   });
 }
 
