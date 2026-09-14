@@ -228,8 +228,13 @@ class HTTPServer {
             let mcpConfig = NSHomeDirectory() + "/.claude/.mcp.json"
             if FileManager.default.fileExists(atPath: mcpConfig) {
                 // strict: account-level claude.ai connectors (unauthenticatable
-                // headless) shadow the local prime-recall server by name
-                args += ["--mcp-config", mcpConfig, "--strict-mcp-config"]
+                // headless) shadow the local prime-recall server by name.
+                // allowedTools: headless -p denies unapproved MCP tools, and the
+                // bypassPermissions default in ~/.claude/settings.json is not ours
+                // to rely on — a laptop settings sync (2026-09-14) flipped every
+                // agent to "default" mode and all prime_* calls were refused.
+                // Placed before --mcp-config so that flag ends the variadic list.
+                args += ["--allowedTools", "mcp__prime-recall", "--mcp-config", mcpConfig, "--strict-mcp-config"]
             }
 
             // System prompt for Prime identity
@@ -351,7 +356,10 @@ class HTTPServer {
         // Load MCP config if available
         let mcpConfig = NSHomeDirectory() + "/.claude/.mcp.json"
         if FileManager.default.fileExists(atPath: mcpConfig) {
-            args += ["--mcp-config", mcpConfig, "--strict-mcp-config"]
+            // Grant prime tools explicitly (see /prime route) unless the caller
+            // scoped its own tool list — a second --allowedTools could replace it.
+            let callerScoped = extraArgs.contains("--allowedTools") || extraArgs.contains("--allowed-tools")
+            args += (callerScoped ? [] : ["--allowedTools", "mcp__prime-recall"]) + ["--mcp-config", mcpConfig, "--strict-mcp-config"]
         }
 
         // Background mode: spawn claude, respond immediately with 202, don't wait
