@@ -23,9 +23,8 @@ if [ -d "$CLAUDE_CODE_SRC" ]; then
   rsync -az --delete "$CLAUDE_CODE_SRC" "${MAC_MINI}:~/${REMOTE_BASE}/claude-code/" 2>/dev/null
 fi
 
-# Claude Code config sync (CLAUDE.md + settings.json → Mac Mini)
-rsync -az "$HOME/.claude/CLAUDE.md" "${MAC_MINI}:~/.claude/CLAUDE.md" 2>/dev/null
-rsync -az "$HOME/.claude/settings.json" "${MAC_MINI}:~/.claude/settings.json" 2>/dev/null
+# Config sync REMOVED 2026-09-14: laptop and Mini need DIFFERENT settings.json
+# (laptop hooks clobbered the Mini agent config the moment its uchg lock came off).
 
 # Claude.ai conversation scan (runs from laptop to bypass Cloudflare)
 # Only runs every 4 hours (checks timestamp)
