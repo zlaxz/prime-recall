@@ -369,7 +369,10 @@ export async function scanGmail(
     /marketing@|promotions@|news@|digest@/i,
   ];
   const beforeNoise = threadData.length;
+  // Allowlist: transactional emails Prime MUST see even from noreply@ senders
+  const NOISE_EXEMPT = [/openai|chatgpt/i];
   const filtered = threadData.filter(td => {
+    if (NOISE_EXEMPT.some(p => p.test(td.lastFrom) || p.test(td.subject))) return true;
     const subjectNoise = NOISE_SUBJECT_PATTERNS.some(p => p.test(td.subject));
     const fromNoise = NOISE_FROM_PATTERNS.some(p => p.test(td.lastFrom));
     if (subjectNoise || fromNoise) {
