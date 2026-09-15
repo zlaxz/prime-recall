@@ -34,3 +34,14 @@ if [ ! -f "$SCAN_MARKER" ] || [ $(($(date +%s) - $(stat -f %m "$SCAN_MARKER" 2>/
   python3 "$HOME/GitHub/prime/scripts/laptop-claude-scan.py" >> /tmp/prime-claude-scan.log 2>&1
   touch "$SCAN_MARKER"
 fi
+
+# Off-machine DB backup (2026-09-15): pull the newest nightly dump from the
+# Mini so a dead Mini SSD cannot take the knowledge base AND its backups.
+# Runs on the existing 30-min cadence — self-heals days the laptop slept at 3am.
+BK_DIR="$HOME/.prime-backups"
+mkdir -p "$BK_DIR"
+LATEST=$(ssh "$MAC_MINI" 'ls -t ~/.prime/backups/prime-*.db.gz 2>/dev/null | head -1')
+if [ -n "$LATEST" ]; then
+  rsync -az --update "${MAC_MINI}:${LATEST}" "$BK_DIR/" 2>/dev/null
+  ls -t "$BK_DIR"/prime-*.db.gz 2>/dev/null | tail -n +8 | xargs rm -f 2>/dev/null
+fi
