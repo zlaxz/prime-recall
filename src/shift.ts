@@ -156,6 +156,15 @@ async function tick() {
       // commitments tracker retired 2026-09-08 — the ledger owns balls in play
     } catch (e) {}
 
+    // ChatGPT export shelf: if OpenAI's export-ready email arrived, pull + shelve it
+    try {
+      const { checkChatGPTExport } = await import('./chatgpt-export.js');
+      const ex = await checkChatGPTExport(db);
+      if (ex.ingested) console.log('[shift]   ChatGPT shelf: ' + ex.ingested + ' conversations ingested');
+    } catch (err: any) {
+      console.log('[shift]   ChatGPT export check failed: ' + (err.message || '').slice(0, 60));
+    }
+
     db.prepare(
       "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_hourly_check', ?, datetime('now'))"
     ).run(JSON.stringify(new Date().toISOString()));
