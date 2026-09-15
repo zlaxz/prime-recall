@@ -13,7 +13,7 @@ import { getDb, getConfig } from '../db.js';
 
 const MCP_PATH = process.env.PRIME_MCP_PATH || '/mcp';
 const BASE = 'https://prime.recaptureinsurance.com';
-const CALLBACK_HOSTS = ['claude.ai', 'claude.com', 'www.claude.ai', 'www.claude.com'];
+const CALLBACK_HOSTS = ['claude.ai', 'claude.com', 'www.claude.ai', 'www.claude.com', 'chatgpt.com', 'www.chatgpt.com', 'chat.openai.com', 'platform.openai.com'];
 
 function ensureStore() {
   const db = getDb();
