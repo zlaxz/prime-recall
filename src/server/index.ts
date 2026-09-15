@@ -188,10 +188,12 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
 
       // Privacy screen — exclude by default
       const hay = (String(title || '') + '\n' + String(full).slice(0, 4000)).toLowerCase();
-      const PERSONAL = [/melatonin|drowsi|insomnia|dosage|symptom|diagnos|prescription|doctor|therapist|therapy|anxiet|depress|medication|health|medical|foot size/, /kendl|girlfriend|dating|relationship|divorce|breakup|miss you|love you/, /my (son|daughter|kid|child|mom|dad|mother|father|wife|husband|ex)\b/];
-      const BUSINESS = [/insurance|underwrit|coverage|policy|claim|broker|carrier|reinsur|loss run|submission|senior living|assisted living|snf|cms|ltc|e&o/, /recapture|carefront|foresite|behrends|recaptureiq|hiscox|prime|quinn|monitor|ledger/];
-      for (const p of PERSONAL) if (p.test(hay)) return res.json({ shelved: false, reason: 'personal — excluded' });
-      if (!BUSINESS.some(p => p.test(hay))) return res.json({ shelved: false, reason: 'no business signal — excluded' });
+      const PERSONAL = [/\bmelatonin|drowsi|insomnia|my (dosage|prescription|doctor|symptom|medication|diagnos|therapist|anxiety|depression)\b|foot size|should i take\b/, /kendl|girlfriend|boyfriend|my (relationship|marriage|divorce|breakup|girlfriend|boyfriend)|miss you|love you|reconcil/, /my (son|daughter|kid|child|mom|dad|mother|father|wife|husband|ex)\b|birthday gift|vacation plan|dinner date/];
+      const BUSINESS = [/insurance|underwrit|coverage|policy|claim|broker|carrier|reinsur|loss run|submission|senior living|assisted living|memory care|skilled nursing|snf|cms|ltc|long.?term care|e&o|premium|actuar|liability/, /recapture|carefront|foresite|behrends|recaptureiq|hiscox|rt specialty|united specialty|gallagher|altea|prime|quinn|monitor|ledger/];
+      const hasBiz = BUSINESS.some(p => p.test(hay));
+      const hasPersonal = PERSONAL.some(p => p.test(hay));
+      if (!hasBiz) return res.json({ shelved: false, reason: hasPersonal ? 'personal, no business context — excluded' : 'no business signal — excluded' });
+      // business context present → shelf (domain health terms are not personal here)
 
       // Redact anything key/secret-shaped so pasted credentials never persist
       const redacted = String(full)

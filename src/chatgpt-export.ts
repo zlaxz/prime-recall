@@ -33,11 +33,13 @@ const BUSINESS_SIGNALS = [
   /\b(prime|quinn|monitor|ledger|deepseek|mcp connector|knowledge base)\b/i,
 ];
 function screenConversation(title: string, firstMessages: string): { shelf: boolean; reason: string } {
-  const hay = (title + '\n' + firstMessages).slice(0, 4000);
-  for (const p of PERSONAL_SIGNALS) if (p.test(hay)) return { shelf: false, reason: 'personal signal: ' + (hay.match(p) || [''])[0] };
-  let biz = 0; for (const p of BUSINESS_SIGNALS) if (p.test(hay)) biz++;
-  if (biz >= 1) return { shelf: true, reason: 'business (' + biz + ' domain signals)' };
-  return { shelf: false, reason: 'no clear business signal — excluded by default' };
+  const hay = (title + '\n' + firstMessages).slice(0, 4000).toLowerCase();
+  const BUSINESS = [/insurance|underwrit|coverage|policy|claim|broker|carrier|reinsur|loss run|submission|senior living|assisted living|memory care|skilled nursing|snf|cms|ltc|long.?term care|e&o|premium|actuar|liability/, /recapture|carefront|foresite|behrends|recaptureiq|hiscox|rt specialty|united specialty|gallagher|altea|prime|quinn|monitor|ledger/];
+  const PERSONAL = [/\bmelatonin|drowsi|insomnia|my (dosage|prescription|doctor|symptom|medication|diagnos|therapist|anxiety|depression)\b|foot size|should i take\b/, /kendl|girlfriend|boyfriend|my (relationship|marriage|divorce|breakup)|miss you|love you|reconcil/, /my (son|daughter|kid|child|mom|dad|mother|father|wife|husband|ex)\b|birthday gift|vacation plan|dinner date/];
+  const hasBiz = BUSINESS.some(p => p.test(hay));
+  const hasPersonal = PERSONAL.some(p => p.test(hay));
+  if (hasBiz) return { shelf: true, reason: 'business context' };
+  return { shelf: false, reason: hasPersonal ? 'personal, no business context' : 'no business signal — excluded by default' };
 }
 
 export async function checkChatGPTExport(db: Database.Database): Promise<{ ingested: number }> {
