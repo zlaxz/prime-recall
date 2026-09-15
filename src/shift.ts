@@ -263,19 +263,7 @@ async function tick() {
     }
     logMem('post-quinn');
 
-    // Daily web research — scours internet for relevant articles (20-hour gate)
-    console.log('[shift]   Running daily web research...');
-    try {
-      const { runDailyWebResearch } = await import('./web-research.js');
-      const researchResult = await runDailyWebResearch(db);
-      if (researchResult.skipped) {
-        console.log('[shift]   Research: skipped (already ran today)');
-      } else {
-        console.log('[shift]   Research: ' + researchResult.articles + ' articles stored');
-      }
-    } catch (err: any) {
-      console.log('[shift]   Research failed: ' + (err.message || '').slice(0, 60));
-    }
+    // Daily web research retired 2026-09-15 (Zach: just noise — 347 articles collected, zero ever surfaced)
     logMem('post-research');
 
     // (daily email moved to tick level — audit 2026-08-31: nested inside the
