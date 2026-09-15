@@ -29,6 +29,7 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
 
   // CORS — restrict to known origins
   const ALLOWED_ORIGINS = [
+    'https://chatgpt.com',
     'http://localhost:5173',                    // Local dev (Vite default)
     'http://localhost:3000',                    // Local dev alt
     'http://localhost:8080',                    // Local dev (prime-production)
@@ -177,6 +178,53 @@ export async function startServer(port: number = 3210, options: { sync?: boolean
   });
 
   // Remember (quick capture)
+  // Direct transcript ingest (ChatGPT on-demand pull): browser POSTs a full
+  // conversation here so it never passes through the model's context. Screened
+  // (business-only) + secret-redacted before it touches the shelf.
+  app.post('/api/ingest-transcript', async (req, res) => {
+    try {
+      const { id, title, update_time, full } = req.body || {};
+      if (!id || !full) return res.status(400).json({ error: 'id and full required' });
+
+      // Privacy screen — exclude by default
+      const hay = (String(title || '') + '\n' + String(full).slice(0, 4000)).toLowerCase();
+      const PERSONAL = [/melatonin|drowsi|insomnia|dosage|symptom|diagnos|prescription|doctor|therapist|therapy|anxiet|depress|medication|health|medical|foot size/, /kendl|girlfriend|dating|relationship|divorce|breakup|miss you|love you/, /my (son|daughter|kid|child|mom|dad|mother|father|wife|husband|ex)\b/];
+      const BUSINESS = [/insurance|underwrit|coverage|policy|claim|broker|carrier|reinsur|loss run|submission|senior living|assisted living|snf|cms|ltc|e&o/, /recapture|carefront|foresite|behrends|recaptureiq|hiscox|prime|quinn|monitor|ledger/];
+      for (const p of PERSONAL) if (p.test(hay)) return res.json({ shelved: false, reason: 'personal — excluded' });
+      if (!BUSINESS.some(p => p.test(hay))) return res.json({ shelved: false, reason: 'no business signal — excluded' });
+
+      // Redact anything key/secret-shaped so pasted credentials never persist
+      const redacted = String(full)
+        .replace(/sk-[A-Za-z0-9_-]{16,}/g, '[REDACTED-KEY]')
+        .replace(/\b[A-Za-z0-9_-]{40,}\b/g, m => (/^[A-Za-z0-9+/=]+$/.test(m) && m.length > 60 ? '[REDACTED-TOKEN]' : m))
+        .replace(/Bearer\s+[A-Za-z0-9._-]+/g, 'Bearer [REDACTED]')
+        .replace(/eyJ[A-Za-z0-9._-]{20,}/g, '[REDACTED-JWT]');
+
+      const { writeFileSync, mkdirSync } = await import('fs');
+      const shelfDir = '/Users/zachstock/.prime/chatgpt-shelf';
+      mkdirSync(shelfDir, { recursive: true });
+      const file = shelfDir + '/' + String(id).replace(/[^a-zA-Z0-9-]/g, '') + '.txt';
+      const ut = update_time ? Math.floor(new Date(update_time).getTime() / 1000) : Math.floor(Date.now() / 1000);
+      writeFileSync(file, '# ' + (title || 'untitled') + '\n# updated: ' + new Date(ut * 1000).toISOString() + '\n\n' + redacted);
+
+      const { v4: uuid } = await import('uuid');
+      const key = 'chatgpt:' + id;
+      const prior = db.prepare('SELECT id FROM knowledge WHERE source_ref = ?').get(key) as any;
+      const msgCount = redacted.split('\n\n').length;
+      const summary = 'Complete ChatGPT transcript (' + msgCount + ' segments). Full text on shelf: ' + file;
+      if (prior) {
+        db.prepare("UPDATE knowledge SET summary=?, source_date=?, metadata=?, updated_at=datetime('now') WHERE id=?")
+          .run(summary, new Date(ut * 1000).toISOString(), JSON.stringify({ file, update_time: ut }), prior.id);
+      } else {
+        const { insertKnowledge } = await import('../db.js');
+        insertKnowledge(db, { id: uuid(), title: '[ChatGPT full] ' + String(title || 'untitled').slice(0, 90), summary, source: 'chatgpt-export', source_ref: key, source_date: new Date(ut * 1000).toISOString(), importance: 'normal', provenance: 'primary', tags: JSON.stringify(['chatgpt', 'transcript']), metadata: JSON.stringify({ file, update_time: ut }) } as any);
+      }
+      res.json({ shelved: true, file, segments: msgCount });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message || err).slice(0, 200) });
+    }
+  });
+
   app.post('/api/remember', async (req, res) => {
     try {
       const { text, type, project } = req.body;
