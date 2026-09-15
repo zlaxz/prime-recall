@@ -17,6 +17,29 @@ import { randomUUID } from 'crypto';
 
 const SHELF = '/Users/zachstock/.prime/chatgpt-shelf';
 
+// Privacy screen — EXCLUDE BY DEFAULT. Only clearly-business conversations reach
+// the shelf; a missed work thread can be re-pulled, a shelved private one cannot
+// be un-leaked. Returns {shelf:boolean, reason:string}.
+const PERSONAL_SIGNALS = [
+  /\b(melatonin|drowsi|insomnia|sleep|dosage|mg\b|symptom|diagnos|prescription|doctor|therapist|therapy|anxiet|depress|medication|health|medical|blood|weight|diet|workout|foot size)\b/i,
+  /\b(kendl|girlfriend|boyfriend|dating|relationship|marriage|divorce|breakup|reconcil|miss you|love you|dinner date)\b/i,
+  /\b(my (son|daughter|kid|child|mom|dad|mother|father|family|wife|husband|ex)\b)/i,
+  /\b(vacation|birthday|gift idea|recipe|movie|restaurant reservation|personal loan|my mortgage|therapy)\b/i,
+];
+const BUSINESS_SIGNALS = [
+  /\b(insurance|underwrit|E&O|coverage|policy|premium|claim|broker|carrier|reinsur|actuar|loss run|submission|binder|endorsement|surplus lines|admitted)\b/i,
+  /\b(recapture|carefront|foresite|behrends|stock insurance|recaptureiq|hiscox|rt specialty|united specialty|gallagher|altea)\b/i,
+  /\b(senior living|assisted living|memory care|skilled nursing|SNF|CMS|long.?term care|LTC)\b/i,
+  /\b(prime|quinn|monitor|ledger|deepseek|mcp connector|knowledge base)\b/i,
+];
+function screenConversation(title: string, firstMessages: string): { shelf: boolean; reason: string } {
+  const hay = (title + '\n' + firstMessages).slice(0, 4000);
+  for (const p of PERSONAL_SIGNALS) if (p.test(hay)) return { shelf: false, reason: 'personal signal: ' + (hay.match(p) || [''])[0] };
+  let biz = 0; for (const p of BUSINESS_SIGNALS) if (p.test(hay)) biz++;
+  if (biz >= 1) return { shelf: true, reason: 'business (' + biz + ' domain signals)' };
+  return { shelf: false, reason: 'no clear business signal — excluded by default' };
+}
+
 export async function checkChatGPTExport(db: Database.Database): Promise<{ ingested: number }> {
   // 1) Find an unprocessed export-ready email (synced by the gmail connector)
   const seen = (db.prepare("SELECT value FROM graph_state WHERE key='chatgpt_export_last_ref'").get() as any)?.value || '';
@@ -74,6 +97,13 @@ export async function checkChatGPTExport(db: Database.Database): Promise<{ inges
       .sort((a: any, b: any) => (a.create_time || 0) - (b.create_time || 0))
       .map((m: any) => `${m.author?.role || '?'}: ${m.content.parts.join('\n')}`);
     if (!msgs.length) continue;
+    const screen = screenConversation(c.title || '', msgs.slice(0, 6).join('\n'));
+    if (!screen.shelf) {
+      // log the exclusion so Zach can whitelist a false-negative, but store nothing
+      db.prepare("INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+        .run('chatgpt_excluded:' + cid, JSON.stringify({ title: c.title, reason: screen.reason }));
+      continue;
+    }
     const full = msgs.join('\n\n');
     const file = join(SHELF, `${cid}.txt`);
     writeFileSync(file, `# ${c.title || 'untitled'}\n# updated: ${new Date(updated * 1000).toISOString()}\n\n${full}`);
