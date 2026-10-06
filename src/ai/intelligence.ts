@@ -746,7 +746,7 @@ export function getRelationshipHealth(db: Database.Database): ContactHealth[] {
       existing.sources.add(item.source);
       if (item.project) existing.projects.add(item.project);
       for (const c of (item.commitments || [])) {
-        if ((c && c.toLowerCase().includes(name.toLowerCase())) || (item.contacts || []).includes(name)) {
+        if ((typeof c === 'string' && c.toLowerCase().includes(name.toLowerCase())) || (item.contacts || []).includes(name)) {
           existing.commitments.push(c);
         }
       }
