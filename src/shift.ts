@@ -220,7 +220,7 @@ async function tick() {
           // Cadence: each monitor runs once per LOCAL day, in the first full cycle
           // after the 7am wake — fresh for the brief, idle the rest of the day.
           const lastRunRaw = (db.prepare(
-            "SELECT last_run_at FROM agent_state WHERE subject_id = ? ORDER BY last_run_at DESC LIMIT 1"
+            "SELECT last_run_at FROM agent_state WHERE subject_id = ? AND agent_type = 'pm' ORDER BY last_run_at DESC LIMIT 1"
           ).get(pm.project) as any)?.last_run_at;
           if (lastRunRaw) {
             const lastLocal = new Date(String(lastRunRaw).replace(' ', 'T') + 'Z').toLocaleDateString('en-CA');
