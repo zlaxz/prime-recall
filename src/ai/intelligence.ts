@@ -159,7 +159,9 @@ function buildPersonContexts(db: Database.Database, filters: EntityFilters): Map
 
     // Fallback: try to match via contacts list
     if (!entityId) {
-      const contacts = (item.contacts || []).filter((c: string) => c && !c.toLowerCase().includes('zach stock'));
+      const _rawC = item.contacts;
+      const _arrC = Array.isArray(_rawC) ? _rawC : (typeof _rawC === 'string' ? (() => { try { return JSON.parse(_rawC); } catch { return []; } })() : []);
+      const contacts = _arrC.filter((c: any) => typeof c === 'string' && !c.toLowerCase().includes('zach stock'));
       if (contacts.length === 0) continue;
 
       for (const contactName of contacts) {
