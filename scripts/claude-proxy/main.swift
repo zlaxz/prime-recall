@@ -287,6 +287,11 @@ class HTTPServer {
                 try proc.run()
                 feedStdin(stdinPipe, primePrompt)
 
+                // Drain stdout concurrently — a child writing >64KB fills the pipe
+                // buffer and blocks on write, so reading only after exit deadlocks (e47bc4da).
+                var drainedOut = Data()
+                let drainSem = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async { drainedOut = stdoutPipe.fileHandleForReading.readDataToEndOfFile(); drainSem.signal() }
                 let deadline = DispatchTime.now() + .seconds(runTimeout)
                 let sem = DispatchSemaphore(value: 0)
                 DispatchQueue.global().async { proc.waitUntilExit(); sem.signal() }
@@ -298,7 +303,8 @@ class HTTPServer {
                 }
                 plog("#\(fd) /prime claude exited \(proc.terminationStatus) in \(elapsed(runStart))s")
 
-                let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                drainSem.wait()
+                let stdout = drainedOut
                 let output = String(data: stdout, encoding: .utf8) ?? ""
 
                 if let jsonData = output.data(using: .utf8),
@@ -424,6 +430,9 @@ class HTTPServer {
             feedStdin(stdinPipe, prompt)
 
             // Wait with timeout
+            var drainedOut2 = Data()
+            let drainSem2 = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async { drainedOut2 = stdoutPipe.fileHandleForReading.readDataToEndOfFile(); drainSem2.signal() }
             let deadline = DispatchTime.now() + .seconds(runTimeout)
             let sem = DispatchSemaphore(value: 0)
             DispatchQueue.global().async {
@@ -437,7 +446,8 @@ class HTTPServer {
                 return sendResponse(fd, status: 504, body: "{\"error\":\"timeout after \(runTimeout)s\"}")
             }
 
-            let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            drainSem2.wait()
+            let stdout = drainedOut2
             let output = String(data: stdout, encoding: .utf8) ?? ""
             plog("#\(fd) /claude claude exited \(proc.terminationStatus) in \(elapsed(runStart))s — \(output.utf8.count)B out")
 
