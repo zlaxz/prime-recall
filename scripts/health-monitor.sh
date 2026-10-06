@@ -398,8 +398,9 @@ if [ -x "$MECH" ]; then
   done
   # Quinn-filed issues: newline-flattened (multi-line observations broke the
   # line-based read), never-attempted first so stuck issues can't starve new ones.
-  sqlite3 "$DB" "SELECT id || '|' || replace(replace(observation,char(10),' '),char(13),' ') || ' — evidence: ' || replace(replace(COALESCE(why_wrong,''),char(10),' '),char(13),' ') FROM system_issues WHERE status='open' ORDER BY (result_status IS NULL) DESC, created_at ASC LIMIT 3" 2>/dev/null | while IFS='|' read -r IID ITEXT; do
+  sqlite3 "$DB" "SELECT id || '|' || replace(replace(observation,char(10),' '),char(13),' ') || ' — evidence: ' || replace(replace(COALESCE(why_wrong,''),char(10),' '),char(13),' ') FROM system_issues WHERE status='open' AND (last_dispatch_at IS NULL OR last_dispatch_at <= datetime('now','-6 hours')) ORDER BY (result_status IS NULL) DESC, created_at ASC LIMIT 3" 2>/dev/null | while IFS='|' read -r IID ITEXT; do
     [ -n "$IID" ] || continue
+    sqlite3 "$DB" "UPDATE system_issues SET last_dispatch_at=datetime('now') WHERE id='$IID'" 2>/dev/null
     log "mechanic ← quinn issue ${IID:0:8}: $(echo "$ITEXT" | head -c 100)"
     nohup bash "$MECH" quinn "$ITEXT" "$IID" >/dev/null 2>&1 &
     sleep 1
