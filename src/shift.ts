@@ -185,6 +185,21 @@ async function tick() {
       "INSERT OR REPLACE INTO graph_state (key, value, updated_at) VALUES ('last_full_cycle', ?, datetime('now'))"
     ).run(JSON.stringify(new Date().toISOString()));
 
+    // Incremental entity graph build (entity_mentions -> relationship-health /
+    // "going cold" alerts). SQL-only, no LLM. This was dropped as collateral
+    // damage when 5d63282 (2026-09-08) retired the whole dream-pipeline call —
+    // entity_mentions froze that day, so every contact's "days since contact"
+    // is computed off a month-old watermark. Call it directly; the rest of the
+    // dream pipeline (commitments extractor, verification, staged actions) stays
+    // retired per that commit.
+    try {
+      const { buildEntityGraph } = await import('./entities.js');
+      const entityStats = buildEntityGraph(db, { incremental: true });
+      console.log(`[shift]   Entity graph: ${entityStats.mentions} mentions, ${entityStats.entities} new entities, ${entityStats.edges} edges`);
+    } catch (err: any) {
+      console.log('[shift]   Entity graph build failed: ' + (err.message || '').slice(0, 80));
+    }
+
     // Wiki compile + verification: DeepSeek's biggest spenders — once per local
     // day is all the once-daily monitors and brief actually consume.
     const wikiDayNow = new Date().toLocaleDateString('en-CA');
