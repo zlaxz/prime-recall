@@ -86,7 +86,7 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
     const { renderBriefHtml, renderBriefText, humanTitle, monitorName, whenText } = await import('./email-format.js');
     const { buildCoverage, getProposals } = await import('./ledger.js');
     const { heldToday } = await import('./email-budget.js');
-    const briefData: any = { actions: [], cleared: [], proposals: [], deadlines: [], coverage: [], held: 0, system: '' };
+    const briefData: any = { actions: [], cleared: [], proposals: [], deadlines: [], coverage: [], held: 0, system: '', meetingTasks: [], owed: [] };
     try {
       const acts = db.prepare(
         "SELECT title, next_action, deadline, ball_since, notified_at, monitor FROM ledger WHERE tier='act' AND status='open' ORDER BY notified_at IS NULL, deadline IS NULL, deadline LIMIT 3"
@@ -96,6 +96,14 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
         why: a.ball_since && !a.deadline ? `waiting since ${a.ball_since}` : '', inInbox: !!a.notified_at,
       }));
       briefData.queued = Math.max(0, (db.prepare("SELECT COUNT(*) n FROM ledger WHERE tier='act' AND status='open'").get() as any).n - acts.length);
+      try {
+        const { getMeetingTasks } = await import('./meeting-tasks.js');
+        briefData.meetingTasks = getMeetingTasks(db, 8);
+      } catch (_e) {}
+      try {
+        const { getBallLists } = await import('./ledger.js');
+        briefData.owed = getBallLists(db).youOwe.slice(0, 6);
+      } catch (_e) {}
       const cleared = db.prepare(
         "SELECT title, deliverable FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-1 day') ORDER BY resolved_at DESC LIMIT 5"
       ).all() as any[];

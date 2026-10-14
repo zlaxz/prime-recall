@@ -137,6 +137,11 @@ export async function syncAll(db: Database.Database): Promise<SyncResult[]> {
       const { scanFireflies } = await import('./fireflies.js');
       const ffResult = await scanFireflies(db, { days: 30, maxMeetings: 50 });
       if (ffResult.items > 0) results.push({ source: 'fireflies', items: ffResult.items });
+      try {
+        const { syncMeetingTasks } = await import('../meeting-tasks.js');
+        const mt = syncMeetingTasks(db);
+        if (mt > 0) results.push({ source: 'meeting-tasks', items: mt });
+      } catch (e: any) { /* non-fatal */ }
     } catch (err: any) {
       results.push({ source: 'fireflies', items: 0, error: err.message?.slice(0, 80) });
     }

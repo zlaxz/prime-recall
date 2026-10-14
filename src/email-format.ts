@@ -74,6 +74,8 @@ export interface BriefData {
   headline: string;                   // one line, the day in a sentence
   prose: string;                      // Quinn's short note (plain text)
   actions: { title: string; why: string; when: string; inInbox: boolean }[];
+  meetingTasks?: { task: string; from: string; days: number }[];
+  owed?: string[];
   cleared: { title: string; file?: string | null }[];
   proposals: { n: number; title: string; from: string }[];
   quinnApproved?: { title: string; from: string; why: string }[];
@@ -84,6 +86,8 @@ export interface BriefData {
 export function renderBriefText(d: BriefData): string {
   const L: string[] = [d.headline, '', d.prose, ''];
   if (d.actions.length) { L.push('YOUR ACTIONS TODAY'); d.actions.forEach((a, i) => L.push(`${i + 1}. ${a.title}${a.when ? ` — ${a.when}` : ''}${a.inInbox ? ' (email in your inbox)' : ''}`)); if ((d as any).queued) L.push(`   …plus ${(d as any).queued} more queued behind the 3-slot cap`); L.push(''); }
+  if ((d as any).meetingTasks?.length) { L.push('FROM YOUR MEETINGS — tasks you took on'); (d as any).meetingTasks.forEach((m: any) => L.push(`• ${m.task}  (${m.from}${m.days ? `, ${m.days}d ago` : ''})`)); L.push(''); }
+  if ((d as any).owed?.length) { L.push('AWAITING YOUR REPLY'); (d as any).owed.forEach((o: string) => L.push(`• ${o}`)); L.push(''); }
   if (d.cleared.length) { L.push('CLEARED'); d.cleared.forEach(c => L.push(`✓ ${c.title}`)); L.push(''); }
   if (d.proposals.length) { L.push('STAFF PROPOSALS — reply "yes to #1" / "no to #2"'); d.proposals.forEach(pr => L.push(`#${pr.n} ${pr.title} (${pr.from})`)); L.push(''); }
   if (d.quinnApproved && d.quinnApproved.length) { L.push('QUINN APPROVED (say "no" to stop)'); d.quinnApproved.forEach(q => L.push(`- ${q.title} (${q.from})`)); L.push(''); }
@@ -106,6 +110,14 @@ export function renderBriefHtml(d: BriefData): string {
         <div style="font-size:13px;color:${C.muted};margin-top:2px;">${esc([a.when, humanWhy(a.why)].filter(Boolean).join(' · '))}${a.inInbox ? ` · <span style="color:${C.accent}">draft in your inbox</span>` : ''}</div>
       </div>`));
     if ((d as any).queued) inner.push(`<div style="font-size:12px;color:${C.muted};margin:4px 0 0 4px;">…plus ${(d as any).queued} more queued behind the 3-slot cap</div>`);
+  }
+  if ((d as any).meetingTasks?.length) {
+    inner.push(h('From your meetings'));
+    (d as any).meetingTasks.forEach((m: any) => inner.push(li(`${esc(m.task)} <span style="color:${C.muted};font-size:12px;">— ${esc(m.from)}${m.days ? `, ${m.days}d ago` : ''}</span>`)));
+  }
+  if ((d as any).owed?.length) {
+    inner.push(h('Awaiting your reply'));
+    (d as any).owed.forEach((o: string) => inner.push(li(esc(o))));
   }
   if (d.cleared.length) {
     inner.push(h('Cleared'));
