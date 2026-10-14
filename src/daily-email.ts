@@ -102,7 +102,10 @@ export async function sendDailyIntelligenceEmail(db: Database.Database): Promise
       } catch (_e) {}
       try {
         const { getBallLists } = await import('./ledger.js');
-        briefData.owed = getBallLists(db).youOwe.slice(0, 6);
+        // Filter doc-share / file / notification noise — these are not emails that
+        // need a REPLY (filenames with versions, invoices, Drive shares, auto-notices).
+        const DOC_NOISE = /_v\d+|v\d+_|\.(pdf|xlsx|docx|png)\b|invoice|_\d{2}_\d{2}_\d{4}|\bshared\b|\bRevision \d+|no-?reply|notification|calendar|receipt/i;
+        briefData.owed = getBallLists(db, 45, 30).youOwe.filter((o: string) => !DOC_NOISE.test(o)).slice(0, 6);
       } catch (_e) {}
       const cleared = db.prepare(
         "SELECT title, deliverable FROM ledger WHERE status='resolved' AND resolved_at >= datetime('now','-1 day') ORDER BY resolved_at DESC LIMIT 5"
